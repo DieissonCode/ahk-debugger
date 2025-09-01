@@ -6,6 +6,7 @@ global PORTA := 4041
 global DEFAULT_FILTER := {DEBUG: 1, INFO: 1, WARN: 1, ERROR: 1}
 global TimestampFormat := "yyyy-MM-dd HH:mm:ss"
 global g_aLogs := []
+global SearchText := "" ; Variável global explícita para o texto de busca
 
 OutputDebug, [SERVER] Script inicializado.
 
@@ -106,7 +107,9 @@ SocketEventHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLengt
 
 ; Evento quando o texto de busca é alterado
 SearchChanged:
-    SetTimer, ApplyFiltersTimer, -300  ; Atrasa levemente para melhor desempenho
+    GuiControlGet, SearchText ; Captura o valor diretamente
+    OutputDebug, [SERVER] SearchChanged chamado. Valor digitado: '%SearchText%'
+    SetTimer, ApplyFiltersTimer, -300 ; Atrasa levemente para melhor desempenho
 return
 
 ApplyFiltersTimer:
@@ -115,10 +118,16 @@ return
 
 ; Filtrar as mensagens
 ApplyFilters() {
-    global g_aLogs
+    global g_aLogs, SearchText
     
-    ; Obter os valores de filtro
+    ; Obter os valores de filtro de forma explícita
     Gui, Submit, NoHide
+    
+    ; Garantir que temos o valor atualizado do campo de busca
+    GuiControlGet, SearchText
+    
+    ; Debug para verificar o valor
+    OutputDebug, [SERVER] ApplyFilters: SearchText = '%SearchText%'
     
     ; Limpar a lista atual
     LV_Delete()
@@ -126,22 +135,15 @@ ApplyFilters() {
     ; Aplicar os filtros
     filteredCount := 0
     
-    ; Debug para verificar o valor atual de SearchText
-    OutputDebug, [SERVER] Aplicando filtros. SearchText = '%SearchText%'
-
     for index, item in g_aLogs {
         ; Verificar filtro de tipo
         typeVar := "Chk" item.tipo
         showByType := %typeVar%
         
         ; Verificar filtro de texto (case insensitive)
-        searchTextLower := SearchText
-        mensagemLower := item.mensagem
-        scriptLower := item.script
-        
         showByText := (SearchText = "") 
-                   || InStr(mensagemLower, searchTextLower, false) 
-                   || InStr(scriptLower, searchTextLower, false)
+                   || InStr(item.mensagem, SearchText, false) 
+                   || InStr(item.script, SearchText, false)
         
         ; Se passar em ambos os filtros, mostrar
         if (showByType && showByText) {
