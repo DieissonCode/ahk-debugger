@@ -1,12 +1,10 @@
-﻿﻿#SingleInstance Force
+﻿#SingleInstance Force
 #Include socket.ahk
 
 ; Configurações globais
 global PORTA := 4041
-global LOG_COLORS := {DEBUG: 0x2196F3, INFO: 0x4CAF50, WARN: 0xFFC107, ERROR: 0xF44336, DEFAULT: 0x000000}
 global DEFAULT_FILTER := {DEBUG: 1, INFO: 1, WARN: 1, ERROR: 1}
 global TimestampFormat := "yyyy-MM-dd HH:mm:ss"
-global g_hWndListView
 global g_aLogs := []
 
 OutputDebug, [SERVER] Script inicializado.
@@ -28,18 +26,12 @@ Gui, Add, Checkbox, x+5 w80 h20 vChkINFO gApplyFilters Checked, INFO
 Gui, Add, Checkbox, x+5 w80 h20 vChkWARN gApplyFilters Checked, WARN
 Gui, Add, Checkbox, x+5 w80 h20 vChkERROR gApplyFilters Checked, ERROR
 Gui, Add, Text, x20 y85 w60, Buscar:
-Gui, Add, Edit, x+5 w300 h20 vSearchText gApplyFilters
+Gui, Add, Edit, x+5 w300 h20 vSearchText gSearchChanged, 
 
-; Lista de logs com cores
-Gui, Add, ListView, x10 y110 w880 r20 vLogView -Multi Grid hwndg_hWndListView, Timestamp|Socket|IP|Tipo|Script|Mensagem
+; Lista de logs
+Gui, Add, ListView, x10 y110 w880 r20 vLogView -Multi Grid, Timestamp|Socket|IP|Tipo|Script|Mensagem
 LV_ModifyCol(1, 140), LV_ModifyCol(2, 60), LV_ModifyCol(3, 100)
 LV_ModifyCol(4, 60), LV_ModifyCol(5, 120), LV_ModifyCol(6, 380)
-
-; Ativar o modo Extended ListView para suportar colorização
-SendMessage, 0x1036, 0, 0x200000, , ahk_id %g_hWndListView% ; LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_FULLROWSELECT
-
-; Registrar callback para colorização
-OnMessage(0x4E, "OnNotify") ; WM_NOTIFY
 
 ; Barra de status
 Gui, Add, StatusBar
@@ -47,7 +39,7 @@ SB_SetParts(200, 150)
 SB_SetText("Logs recebidos: 0", 1)
 SB_SetText("Clientes conectados: 0", 2)
 
-; Guardar as mensagens originais para filtrar
+; Variáveis para controle
 global iConnectedClients := 0
 global iLogsReceived := 0
 
@@ -97,9 +89,9 @@ SocketEventHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLengt
         g_aLogs.Push(newMsg)
         
         ; Adicionar ao ListView
-        rowNum := LV_Add("", newMsg.timestamp, newMsg.socket, newMsg.ip, newMsg.tipo, newMsg.script, newMsg.mensagem)
+        LV_Add("", newMsg.timestamp, newMsg.socket, newMsg.ip, newMsg.tipo, newMsg.script, newMsg.mensagem)
         
-        ; Aplicar filtros automaticamente para caso este log não seja visível
+        ; Aplicar filtros automaticamente
         ApplyFilters()
     }
     else if (sEvent = "DISCONNECTED") {
@@ -112,57 +104,14 @@ SocketEventHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLengt
     }
 }
 
-; Manipulador de notificações para colorir as linhas
-OnNotify(wParam, lParam) {
-    global g_hWndListView, LOG_COLORS, g_aLogs
-    
-    ; Obter informações da notificação
-    Critical
-    hwndFrom := NumGet(lParam+0, 0, "UPtr")
-    
-    ; Se não for do nosso ListView, ignorar
-    if (hwndFrom != g_hWndListView)
-        return
-    
-    ; Obter o código da notificação
-    code := NumGet(lParam+0, A_PtrSize*2, "Int")
-    
-    ; NM_CUSTOMDRAW = -12
-    if (code = -12) {
-        ; Ponteiro para NMLVCUSTOMDRAW
-        nmcd := lParam
-        
-        ; Obter o estágio de desenho
-        drawStage := NumGet(nmcd+0, A_PtrSize*2 + 4, "UInt")
-        
-        ; CDDS_PREPAINT = 1
-        if (drawStage = 1) {
-            ; Informar que queremos notificações para cada item
-            return 0x20 ; CDRF_NOTIFYITEMDRAW
-        }
-        ; CDDS_ITEMPREPAINT = 0x10001
-        else if (drawStage = 0x10001) {
-            ; Obter o índice do item (linha)
-            iItem := NumGet(nmcd+0, A_PtrSize*2 + 8, "Int") + 1 ; +1 porque AHK é 1-based
-            
-            ; Se o item existe nos nossos logs
-            if (iItem <= g_aLogs.Length()) {
-                ; Determinar cor com base no tipo de log
-                log := g_aLogs[iItem]
-                color := log.HasKey("tipo") && LOG_COLORS.HasKey(log.tipo) 
-                      ? LOG_COLORS[log.tipo] : LOG_COLORS.DEFAULT
-                
-                ; Definir cores
-                NumPut(color, nmcd+0, A_PtrSize*2 + 12 + 4, "UInt") ; clrText
-                NumPut(0xFFFFFF, nmcd+0, A_PtrSize*2 + 12 + 8, "UInt") ; clrTextBk
-                
-                ; Informar que alteramos as cores
-                return 0x4 ; CDRF_NEWFONT
-            }
-        }
-    }
-    return
-}
+; Evento quando o texto de busca é alterado
+SearchChanged:
+    SetTimer, ApplyFiltersTimer, -300  ; Atrasa levemente para melhor desempenho
+return
+
+ApplyFiltersTimer:
+    ApplyFilters()
+return
 
 ; Filtrar as mensagens
 ApplyFilters() {
@@ -176,13 +125,23 @@ ApplyFilters() {
     
     ; Aplicar os filtros
     filteredCount := 0
+    
+    ; Debug para verificar o valor atual de SearchText
+    OutputDebug, [SERVER] Aplicando filtros. SearchText = '%SearchText%'
+
     for index, item in g_aLogs {
         ; Verificar filtro de tipo
         typeVar := "Chk" item.tipo
         showByType := %typeVar%
         
-        ; Verificar filtro de texto
-        showByText := !SearchText || InStr(item.mensagem, SearchText) || InStr(item.script, SearchText)
+        ; Verificar filtro de texto (case insensitive)
+        searchTextLower := SearchText
+        mensagemLower := item.mensagem
+        scriptLower := item.script
+        
+        showByText := (SearchText = "") 
+                   || InStr(mensagemLower, searchTextLower, false) 
+                   || InStr(scriptLower, searchTextLower, false)
         
         ; Se passar em ambos os filtros, mostrar
         if (showByType && showByText) {
