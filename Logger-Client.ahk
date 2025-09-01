@@ -1,5 +1,5 @@
 ﻿#SingleInstance Force
-#Include socket.ahk ; Inclui a biblioteca que você forneceu
+#Include socket.ahk
 
 global HOST := "127.0.0.1"
 global PORTA := 4041
@@ -14,7 +14,7 @@ if (err) {
     OutputDebug, [CLIENT] Falha ao iniciar conexão. ErrorLevel: %ErrorLevel%
     ExitApp
 }
-Return ; Fim da seção de auto-execução
+Return
 
 ClientSocketHandler(sEvent, iSocket) {
     OutputDebug, [CLIENT] ClientSocketHandler chamado. Evento: %sEvent% | Socket: %iSocket%
@@ -66,7 +66,6 @@ EnviarLog(mensagem, tipo) {
         OutputDebug, [CLIENT] Log enviado com sucesso!
     }
 }
-
 
 GuiClose:
 OnExit:
