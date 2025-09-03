@@ -1,5 +1,5 @@
 ﻿; Logger.ahk - Versão simples e robusta para envio de logs
-#Include socket.ahk
+#Include C:\Autohotkey 2024\Root\Libs\socket.ahk
 
 class Logger {
     static HOST := "127.0.0.1"  ; Endereço do servidor

@@ -1,4 +1,27 @@
-﻿#SingleInstance Force
+﻿; ===== Logger-Server.ahk =====
+; Servidor para recebimento, exibição e filtragem de logs
+; Versão: 1.1.2
+; Data: 2025-09-01
+; Autor: Dieisson Code
+; Repositório: https://github.com/DieissonCode/ahk-debugger
+;
+; === Descrição ===
+; Este servidor recebe logs enviados pela biblioteca logger.ahk, exibe-os
+; em uma interface gráfica organizada e permite filtrar por tipo, script e texto.
+; Também oferece estatísticas sobre os logs recebidos e exportação para CSV.
+;
+; === Níveis de Log ===
+; - DEBUG: Informações detalhadas para debugging e desenvolvimento
+; - INFO: Mensagens informativas sobre o fluxo normal de execução
+; - WARN: Alertas que não impedem a execução, mas merecem atenção
+; - ERROR: Erros que afetam a funcionalidade, mas não interrompem o script
+;
+; === Uso ===
+; 1. Inicie este servidor antes de qualquer cliente que use logger.ahk
+; 2. Use os controles de filtro para focar em logs específicos
+; 3. Exporte os logs filtrados para CSV quando necessário
+
+#SingleInstance Force
 #Include socket.ahk
 
 ; Configurações globais
@@ -23,7 +46,7 @@ Gui, Add, Button, x+10 w80 h25 gClearLogs, Limpar
 Gui, Add, Button, x+10 w100 h25 gExportLogs, Exportar Logs
 
 ; Filtros - Aumentei a altura da GroupBox para acomodar a ComboBox completamente
-Gui, Add, GroupBox, x10 y40 w470 h115, Filtros
+Gui, Add, GroupBox, x10 y40 w350 h115, Filtros
 
 ; Filtros de tipo
 Gui, Add, Checkbox, x20 y60 w80 h20 vChkDEBUG gApplyFilters Checked, DEBUG
@@ -38,15 +61,15 @@ Gui, Add, Text, x20 y115 w60, Script:
 Gui, Add, ComboBox, x+5 w200 h20 R10 vSelectedScript gScriptSelected, Todos||
 
 ; Estatísticas - aumentei a altura para acomodar estatísticas por script
-Gui, Add, GroupBox, x490 y40 w400 h115, Estatísticas
-Gui, Add, Text, x500 y60 w380 vStatsTextGlobal, Scripts conectados: 0 | Logs recebidos: 0
+Gui, Add, GroupBox, x370 y40 w600 h115, Estatísticas
+Gui, Add, Text, x380 y60 w580 vStatsTextGlobal, Scripts conectados: 0 | Logs recebidos: 0
 ; Linha separadora
-Gui, Add, Text, x500 y85 w380 h2 0x10 ; Estilo 0x10 = SS_BLACKRECT
+Gui, Add, Text, x380 y85 w580 h2 0x10 ; Estilo 0x10 = SS_BLACKRECT
 ; Estatísticas específicas do script selecionado
-Gui, Add, Text, x500 y95 w380 vStatsTextScript, Selecione um script para ver estatísticas específicas
+Gui, Add, Text, x380 y95 w580 vStatsTextScript, Selecione um script para ver estatísticas específicas
 
 ; Lista de logs - ajustada para começar após as GroupBoxes maiores
-Gui, Add, ListView, x10 y165 w880 r20 vLogView -Multi Grid, Timestamp|Socket|IP|Tipo|Script|Mensagem
+Gui, Add, ListView, x10 y165 w860 r20 vLogView -Multi Grid, Timestamp|Socket|IP|Tipo|Script|Mensagem
 LV_ModifyCol(1, 140), LV_ModifyCol(2, 60), LV_ModifyCol(3, 100)
 LV_ModifyCol(4, 60), LV_ModifyCol(5, 120), LV_ModifyCol(6, 380)
 
@@ -67,7 +90,7 @@ SysGet, MonitorWorkArea, MonitorWorkArea
 serverX := 10
 serverY := MonitorWorkAreaBottom - 500
 
-Gui, Show, x%serverX% y%serverY% w900 h500, Logger Server v1.1
+Gui, Show, x%serverX% y%serverY% w980 h500, Logger Server v1.1.2
 
 ; Iniciar o servidor
 err := AHKsock_Listen(PORTA, "SocketEventHandler")
@@ -94,9 +117,6 @@ SocketEventHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLengt
     else if (sEvent = "RECEIVED") {
         dataStr := StrGet(&bData, bDataLength, "UTF-8")
         OutputDebug, [SERVER] RECEIVED | Socket: %iSocket% | IP: %sAddr% | Data: %dataStr%
-        
-        ; Debug para ver os dados brutos
-        OutputDebug, [SERVER] Dados brutos: %dataStr%
         
         ; Método melhorado para analisar a string: dividir por "||" e processar cada parte
         partes := StrSplit(dataStr, "||")
@@ -128,13 +148,13 @@ SocketEventHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLengt
         iLogsReceived++
         SB_SetText("Logs recebidos: " iLogsReceived, 1)
         
-        ; Adicionar à array de mensagens
+        ; Adicionar à array de mensagens (no início para manter ordem cronológica invertida)
         newMsg := {timestamp: timestamp, socket: iSocket, ip: sAddr, tipo: tipo
                  , script: scriptName, mensagem: mensagem}
-        g_aLogs.Push(newMsg)
+        g_aLogs.InsertAt(1, newMsg)  ; Inserir no início do array
         
-        ; Adicionar ao ListView
-        LV_Add("", newMsg.timestamp, newMsg.socket, newMsg.ip, newMsg.tipo, newMsg.script, newMsg.mensagem)
+        ; Adicionar ao ListView (na primeira linha)
+        LV_Insert(1, "", newMsg.timestamp, newMsg.socket, newMsg.ip, newMsg.tipo, newMsg.script, newMsg.mensagem)
         
         ; Aplicar filtros automaticamente
         ApplyFilters()
@@ -236,7 +256,7 @@ UpdateStatsDisplay() {
               . ", WARN=" . totalWarn 
               . ", ERROR=" . totalError
     
-    GuiControl,, StatsTextGlobal, %statsText%
+    GuiControl,, StatsTextGlobal, %	"`n`t" statsText
 }
 
 ; Atualizar estatísticas específicas do script selecionado
@@ -295,46 +315,68 @@ return
 ; Filtrar as mensagens
 ApplyFilters() {
     global g_aLogs, SearchText, SelectedScript
-    
+    static lastSearchText := ""
+    static lastSelectedScript := ""
+    static lastChkDEBUG := ""
+    static lastChkINFO := ""
+    static lastChkWARN := ""
+    static lastChkERROR := ""
+
     ; Obter os valores de filtro de forma explícita
     Gui, Submit, NoHide
-    
-    ; Garantir que temos o valor atualizado do campo de busca
     GuiControlGet, SearchText
     GuiControlGet, SelectedScript
-    
-    ; Debug para verificar o valor
-    OutputDebug, [SERVER] ApplyFilters: SearchText = '%SearchText%', SelectedScript = '%SelectedScript%'
-    
-    ; Limpar a lista atual
-    LV_Delete()
-    
-    ; Aplicar os filtros
-    filteredCount := 0
-    
-    for index, item in g_aLogs {
-        ; Verificar filtro de tipo
-        typeVar := "Chk" item.tipo
-        showByType := %typeVar%
-        
-        ; Verificar filtro de texto (case insensitive)
-        showByText := (SearchText = "") 
-                   || InStr(item.mensagem, SearchText, false) 
-                   || InStr(item.script, SearchText, false)
-        
-        ; Verificar filtro de script
-        showByScript := (SelectedScript = "Todos") 
-                     || (item.script = SelectedScript)
-        
-        ; Se passar em todos os filtros, mostrar
-        if (showByType && showByText && showByScript) {
-            LV_Add("", item.timestamp, item.socket, item.ip, item.tipo, item.script, item.mensagem)
-            filteredCount++
+    GuiControlGet, ChkDEBUG
+    GuiControlGet, ChkINFO
+    GuiControlGet, ChkWARN
+    GuiControlGet, ChkERROR
+
+    ; Só atualiza se algum filtro mudou
+    if (  SearchText        != lastSearchText
+        || SelectedScript   != lastSelectedScript
+        || ChkDEBUG         != lastChkDEBUG
+        || ChkINFO          != lastChkINFO
+        || ChkWARN          != lastChkWARN
+        || ChkERROR         != lastChkERROR) 
+    {
+        ; Atualiza os últimos valores
+        lastSearchText      := SearchText
+        lastSelectedScript  := SelectedScript
+        lastChkDEBUG        := ChkDEBUG
+        lastChkINFO         := ChkINFO
+        lastChkWARN         := ChkWARN
+        lastChkERROR        := ChkERROR
+
+        ; Limpar a lista atual
+        LV_Delete()
+
+        ; Aplicar os filtros
+        filteredCount := 0
+
+        for index, item in g_aLogs {
+            ; Verificar filtro de tipo
+            typeVar := "Chk" item.tipo
+            showByType := %typeVar%
+
+            ; Verificar filtro de texto (case insensitive)
+            showByText := (SearchText = "") 
+                       || InStr(item.mensagem, SearchText, false) 
+                       || InStr(item.script, SearchText, false)
+
+            ; Verificar filtro de script
+            showByScript := (SelectedScript = "Todos") 
+                         || (item.script = SelectedScript)
+
+            ; Se passar em todos os filtros, mostrar
+            if (showByType && showByText && showByScript) {
+                LV_Insert(filteredCount + 1, "", item.timestamp, item.socket, item.ip, item.tipo, item.script, item.mensagem)
+                filteredCount++
+            }
         }
+
+        ; Atualizar barra de status
+        SB_SetText("Logs exibidos: " filteredCount " / " g_aLogs.Length(), 1)
     }
-    
-    ; Atualizar barra de status
-    SB_SetText("Logs exibidos: " filteredCount " / " g_aLogs.Length(), 1)
 }
 
 ; Limpar todos os logs

@@ -1,5 +1,5 @@
 ﻿#SingleInstance Force
-#Include socket.ahk
+#Include C:\Autohotkey 2024\Root\Libs\socket.ahk
 
 global HOST := "127.0.0.1"
 global PORTA := 4041
