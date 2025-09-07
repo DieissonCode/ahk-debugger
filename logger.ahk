@@ -1,97 +1,135 @@
-﻿; Logger.ahk - Versão simples e robusta para envio de logs
+﻿; Logger.ahk - Simple and robust logger with reverse connection support
 #Include C:\Autohotkey 2024\Root\Libs\socket.ahk
 #Include C:\AutoHotkey\class\functions.ahk
 
 class Logger {
-    static HOST := "192.9.100.100"
-    static PORTA := 4041
-    static g_Socket := -1
+    static DEFAULT_HOST := "192.9.100.100"
+    static DEFAULT_PORT := 4041
+    static REVERSE_PORT := 5041
+    static socket := -1
+    static reverseSocket := -1
     static scriptName := ""
     static isConnected := false
 
-    __New(obj="") {
+    __New(obj := "") {
         this.scriptName := obj.name ? obj.name : A_IPAddress1 " - " A_ScriptName
-        this.HOST := obj.host ? obj.host : this.HOST
-        DebugLogSmart("[Logger] Inicializando para script: " this.scriptName)
-        this.Connect()
+        this.host := obj.host ? obj.host : Logger.DEFAULT_HOST
+        this.port := obj.port ? obj.port : Logger.DEFAULT_PORT
+        DebugLogSmart("[LOGGER] Initializing for script: " . this.scriptName)
+        this.connect()
+        this.startReverseListener()
     }
 
-    Connect() {
-        DebugLogSmart("[Logger] Tentando conectar ao servidor em " this.HOST ":" this.PORTA)
-        err := AHKsock_Connect(this.HOST, this.PORTA, "LoggerSocketHandler")
+    connect() {
+        DebugLogSmart("[LOGGER] Attempting to connect to server at " . this.host . ":" . this.port)
+        err := AHKsock_Connect(this.host, this.port, "LoggerSocketHandler")
         if (err) {
-            DebugLogSmart("[Logger] Falha ao conectar. Erro: " err)
+            DebugLogSmart("[LOGGER] Failed to connect. Error: " . err)
             return false
         }
-        DebugLogSmart("[Logger] Solicitação de conexão enviada")
+        DebugLogSmart("[LOGGER] Connection request sent")
         return true
     }
 
-    Log(message, level := "INFO") {
+    startReverseListener() {
+        err := AHKsock_Listen(Logger.REVERSE_PORT, "LoggerReverseHandler")
+        if (err) {
+            DebugLogSmart("[LOGGER] Failed to start reverse port. Error: " . err)
+        } else {
+            DebugLogSmart("[LOGGER] Listening on reverse port: " . Logger.REVERSE_PORT)
+        }
+    }
+
+    log(message, level := "INFO") {
         if (!this.isConnected) {
-			Try this.Connect()
-				if (!this.isConnected)	{
-          			DebugLogSmart("[Logger] Não conectado.`n`ttipo=" . level . "||scriptName=" . StrReplace(StrReplace(this.scriptName, ".ahk"), ".exe") . "||mensagem=" . message)
-            		return false
-				}
+            try this.connect()
+            if (!this.isConnected) {
+                DebugLogSmart("[LOGGER] Not connected.`n`ttype=" . level . "||scriptName=" . this.scriptName . "||message=" . message)
+                return false
+            }
         }
         
-        dataStr := "tipo=" . level . "||scriptName=" . StrReplace(StrReplace(this.scriptName, ".ahk"), ".exe") . "||mensagem=" . message
-        DebugLogSmart("[Logger] Enviando: " dataStr)
+        dataStr := "type=" . level . "||scriptName=" . this.scriptName . "||message=" . message
+        DebugLogSmart("[LOGGER] Sending: " . dataStr)
 
         VarSetCapacity(utf8, StrPut(dataStr, "UTF-8"))
         StrPut(dataStr, &utf8, "UTF-8")
         bytesToSend := StrPut(dataStr, "UTF-8") - 1
         
-        err := AHKsock_ForceSend(this.g_Socket, &utf8, bytesToSend)
+        err := AHKsock_ForceSend(Logger.socket, &utf8, bytesToSend)
         
         if (err) {
-            DebugLogSmart("[Logger] Erro ao enviar: " err)
+            DebugLogSmart("[LOGGER] Error sending: " . err)
             this.isConnected := false
             return false
         }
         
-        DebugLogSmart("[Logger] Log enviado com sucesso")
+        DebugLogSmart("[LOGGER] Log sent successfully")
         return true
     }
 
-    Debug(message) {
-        return this.Log(message, "DEBUG")
+    debug(message) {
+        return this.log(message, "DEBUG")
     }
 
-    Error(message) {
-        return this.Log(message, "ERROR")
+    error(message) {
+        return this.log(message, "ERROR")
     }
 
-    Load(message) {
-        return this.Log(message, "LOAD")
+    load(message) {
+        return this.log(message, "LOAD")
     }
 
-    Info(message) {
-        return this.Log(message, "INFO")
+    info(message) {
+        return this.log(message, "INFO")
     }
     
-    Warn(message) {
-        return this.Log(message, "WARN")
+    warn(message) {
+        return this.log(message, "WARN")
+    }
+
+    processReverseMessage(message) {
+        ; Custom handler for reverse messages (commands from server)
+        DebugLogSmart("[LOGGER-REVERSE] Processing message: " . message)
+        ; Example: Show a MsgBox (can be replaced by custom logic)
+        MsgBox, % "[LOGGER-REVERSE] Command received from server:`n" message
     }
 }
 
 LoggerSocketHandler(sEvent, iSocket, sName, sAddr, sPort) {
-    DebugLogSmart("[Logger] Evento: " sEvent " | Socket: " iSocket)
+    DebugLogSmart("[LOGGER] Event: " . sEvent . " | Socket: " . iSocket)
     
     if (sEvent = "CONNECTED") {
         if (iSocket != -1) {
-            Logger.g_Socket := iSocket
+            Logger.socket := iSocket
             Logger.isConnected := true
-            DebugLogSmart("[Logger] Conectado com sucesso! Socket: " iSocket)
+            DebugLogSmart("[LOGGER] Successfully connected! Socket: " . iSocket)
         } else {
             Logger.isConnected := false
-            DebugLogSmart("[Logger] Falha na conexão")
+            DebugLogSmart("[LOGGER] Connection failed")
         }
     }
     else if (sEvent = "DISCONNECTED") {
         Logger.isConnected := false
-        Logger.g_Socket := -1
-        DebugLogSmart("[Logger] Desconectado do servidor")
+        Logger.socket := -1
+        DebugLogSmart("[LOGGER] Disconnected from server")
+    }
+}
+
+LoggerReverseHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData := "", bDataLength := "") {
+    DebugLogSmart("[LOGGER-REVERSE] Event: " . sEvent . " | Socket: " . iSocket . " | IP: " . sAddr)
+    if (sEvent = "ACCEPTED") {
+        Logger.reverseSocket := iSocket
+        DebugLogSmart("[LOGGER-REVERSE] Server connected to reverse port.")
+    }
+    else if (sEvent = "RECEIVED") {
+        dataStr := StrGet(&bData, bDataLength, "UTF-8")
+        DebugLogSmart("[LOGGER-REVERSE] Message received: " . dataStr)
+        logger := Logger
+        logger.processReverseMessage(dataStr)
+    }
+    else if (sEvent = "DISCONNECTED") {
+        Logger.reverseSocket := -1
+        DebugLogSmart("[LOGGER-REVERSE] Server disconnected from reverse port.")
     }
 }
