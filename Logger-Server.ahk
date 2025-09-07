@@ -1,6 +1,6 @@
 ﻿;Save_To_Sql=1
 ;Keep_Versions=5
-;@Ahk2Exe-Let U_FileVersion=0.1.0.0
+;@Ahk2Exe-Let U_FileVersion=0.1.1.2
 ;@Ahk2Exe-SetFileVersion %U_FileVersion%
 ;@Ahk2Exe-Let U_C=KAH - Logger de Execução de Sistemas
 ;@Ahk2Exe-SetDescription %U_C%
