@@ -5,6 +5,13 @@
 ;@Ahk2Exe-Let U_C=KAH - Logger de Execução de Sistemas
 ;@Ahk2Exe-SetDescription %U_C%
 ;@Ahk2Exe-SetMainIcon C:\AHK\icones\dashboard.ico
+
+; ===== Logger-Server.ahk =====
+; Servidor para recebimento, exibição e filtragem de logs
+; Versão: 1.1.2
+; Data: 2025-09-01
+; Autor: Dieisson Code
+; Repositório: https://github.com/DieissonCode/ahk-debugger
 ;
 ; === Descrição ===
 ; Este servidor recebe logs enviados pela biblioteca logger.ahk, exibe-os
@@ -16,6 +23,11 @@
 ; - INFO: Mensagens informativas sobre o fluxo normal de execução
 ; - WARN: Alertas que não impedem a execução, mas merecem atenção
 ; - ERROR: Erros que afetam a funcionalidade, mas não interrompem o script
+;
+; === Uso ===
+; 1. Inicie este servidor antes de qualquer cliente que use logger.ahk
+; 2. Use os controles de filtro para focar em logs específicos
+; 3. Exporte os logs filtrados para CSV quando necessário
 
 #SingleInstance Force
 #Include C:\Autohotkey 2024\Root\Libs\socket.ahk
@@ -28,12 +40,12 @@ global TimestampFormat := "yyyy-MM-dd HH:mm:ss"
 global g_aLogs := []
 global SearchText := ""  ; Variável global para o texto de busca
 global ActiveScripts := [] ; Array para rastrear scripts ativos
-global SelectedScripts := {} ; Hash para rastrear scripts selecionados
+global SelectedScripts := {} ; Hashtable para rastrear scripts selecionados na ListView
 
 DebugLogSmart("[SERVER] Script inicializado.")
 
 ; Criar GUI com abas e controles
-Gui, +Resize +MinSize680x300 +AlwaysOnTop
+Gui, +Resize +MinSize480x300 +AlwaysOnTop
 Gui, Color, FFFFFF
 Gui, Font, s10, Segoe UI
 
@@ -41,33 +53,31 @@ Gui, Add, Text, x10 y10 w300, Servidor de Log (Porta: %PORTA%)
 Gui, Add, Button, x+10 w80 h25 gClearLogs, Limpar
 Gui, Add, Button, x+10 w100 h25 gExportLogs, Exportar Logs
 
-Gui, Add, GroupBox, x10 y40 w210 h115, Filtros
+Gui, Add, GroupBox, x10 y40 w410 h115, Filtros
 
 Gui, Add, Checkbox, x20 y60 w80 h20 vChkDEBUG gApplyFilters Checked, DEBUG
 Gui, Add, Checkbox, x+5 w80 h20 vChkINFO gApplyFilters Checked, INFO
-Gui, Add, Checkbox, x20 y80 w80 h20 vChkWARN gApplyFilters Checked, WARN
+Gui, Add, Checkbox, x+5 w80 h20 vChkWARN gApplyFilters Checked, WARN
 Gui, Add, Checkbox, x+5 w80 h20 vChkERROR gApplyFilters Checked, ERROR
-Gui, Add, Checkbox, x20 y100 w80 h20 vChkLOAD gApplyFilters Checked, LOAD
+Gui, Add, Checkbox, x+5 w50 h20 vChkLOAD gApplyFilters Checked, LOAD
 
-Gui, Add, Text, x20 y125 w60, Buscar:
-Gui, Add, Edit, x80 y122 w130 h20 vSearchText gSearchChanged, 
+Gui, Add, Text, x20 y90 w60, Buscar:
+Gui, Add, Edit, x+5 w200 h20 vSearchText gSearchChanged, 
 
-Gui, Add, GroupBox, x230 y40 w810 h115, Estatísticas
-Gui, Add, Text, x240 y60 w790 vStatsTextGlobal, Scripts conectados: 0 | Logs recebidos: 0
-Gui, Add, Text, x240 y85 w790 h2 0x10
-Gui, Add, Text, x240 y95 w790 h50 vStatsTextScript, Selecione scripts para ver estatísticas específicas
-
-; Adicionar ListView para scripts na esquerda
-Gui, Add, GroupBox, x10 y165 w200 h350, Scripts Conectados
-Gui, Add, ListView, x15 y185 w190 h325 vScriptListView gScriptListViewClick Checked0 AltSubmit Grid, Software
-
-; Adicionar o item "Todos" na ListView
-Gui, ListView, ScriptListView
+; Adicionar ListView para scripts à esquerda (com checkboxes)
+Gui, Add, ListView, x10 y165 w200 r20 vScriptsListView +Checked gScriptsListViewChanged AltSubmit, Scripts
+; Adicionar o item "Todos" como primeira linha
 LV_Add("", "Todos")
-SelectedScripts["Todos"] := 1  ; Marcar "Todos" como selecionado por padrão
+; Adicionar o item "Todos" ao dicionário de scripts selecionados (inicialmente desmarcado)
+SelectedScripts["Todos"] := 0
 
-; Adicionar ListView para logs na direita
-Gui, Add, ListView, x220 y165 w820 r20 vLogView -Multi Grid, Timestamp|Socket|IP|Tipo|Script|Mensagem
+Gui, Add, GroupBox, x440 y40 w600 h115, Estatísticas
+Gui, Add, Text, x460 y60 w580 vStatsTextGlobal, Scripts conectados: 0 | Logs recebidos: 0
+Gui, Add, Text, x460 y85 w580 h2 0x10
+Gui, Add, Text, x460 y95 w580 h50 vStatsTextScript, Selecione um script para ver estatísticas específicas
+
+; ListView para exibir logs (à direita)
+Gui, Add, ListView, x220 y165 w750 r20 vLogView -Multi Grid, Timestamp|Socket|IP|Tipo|Script|Mensagem
 
 ResizeListViewColumns()
 
@@ -85,7 +95,7 @@ SysGet, MonitorWorkArea, MonitorWorkArea
 serverX := 10
 serverY := MonitorWorkAreaBottom - 500
 
-Gui, Show, x%serverX% y%serverY% w1050 h550, Logger Server v1.1.3
+Gui, Show, x%serverX% y%serverY% w1050 h500, Logger Server v1.1.2
 
 err := AHKsock_Listen(PORTA, "SocketEventHandler")
 DebugLogSmart("[SERVER] AHKsock_Listen chamado. Porta: " PORTA " | Resultado: " (err ? err : "Ativado"))
@@ -161,30 +171,43 @@ SocketEventHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLengt
 }
 
 AddScriptToRegistry(scriptName) {
-    Global ActiveScripts, ScriptStats
+    global ActiveScripts, ScriptStats, SelectedScripts
     if (scriptName = "N/A" || scriptName = "")
         return
-    if (!ActiveScripts.HasKey(scriptName)) {
-        ActiveScripts[scriptName]	:= 1
-        ScriptStats[scriptName]		:= {DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0, LOAD: 0, total: 0}
-		Gui, ListView, ScriptListView
+    
+    isNew := true
+    for i, existingScript in ActiveScripts {
+        if (existingScript = scriptName) {
+            isNew := false
+            break
+        }
+    }
+    
+    if (isNew) {
+        ActiveScripts.Push(scriptName)
+        if (!ScriptStats.HasKey(scriptName)) {
+            ScriptStats[scriptName] := {DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0, LOAD: 0, total: 0}
+        }
+        
+        ; Adicionar o novo script à ListView (inicialmente desmarcado)
+        Gui, ListView, ScriptsListView
         LV_Add("", scriptName)
-		OutputDebug, % scriptname
+        SelectedScripts[scriptName] := 0  ; 0 = desmarcado
+        
         SB_SetText("Scripts únicos: " . ActiveScripts.Length(), 3)
     }
 }
 
 UpdateScriptStats(scriptName, logType) {
-    global ScriptStats, ActiveScripts
-    
+    global ScriptStats
     if (!ScriptStats.HasKey(scriptName)) {
         ScriptStats[scriptName] := {DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0, LOAD: 0, total: 0}
     }
     if (ScriptStats[scriptName].HasKey(logType))
         ScriptStats[scriptName, logType] += 1
     ScriptStats[scriptName, "total"] += 1
-
     UpdateStatsDisplay()
+    UpdateScriptSpecificStats(scriptName)
 }
 
 UpdateStatsDisplay() {
@@ -210,91 +233,75 @@ UpdateStatsDisplay() {
     GuiControl,, StatsTextGlobal, %statsText%
 }
 
-UpdateScriptSpecificStats() {
+UpdateScriptSpecificStats(scriptName) {
     global ScriptStats, SelectedScripts
     
-    ; Verificar quais scripts estão selecionados
-    selectedScriptCount := 0
-    scriptStatsText := ""
+    scriptStatsText := "Exibindo logs dos scripts selecionados"
     
-    ; Se "Todos" estiver selecionado, mostrar estatísticas gerais
-    if (SelectedScripts.HasKey("Todos") && SelectedScripts["Todos"]) {
-        scriptStatsText := "Exibindo logs de todos os scripts"
-    } else {
-        ; Preparar estatísticas para scripts selecionados
-        totalDebug := 0
-        totalInfo := 0
-        totalWarn := 0
-        totalError := 0
-        totalLoad := 0
-        totalLogs := 0
-        
-        scriptNames := ""
-        
-        ; Iterar pelos scripts selecionados
-        for scriptName, isSelected in SelectedScripts {
-            if (isSelected && scriptName != "Todos" && ScriptStats.HasKey(scriptName)) {
-                selectedScriptCount++
-                
-                totalDebug += ScriptStats[scriptName, "DEBUG"]
-                totalInfo += ScriptStats[scriptName, "INFO"]
-                totalWarn += ScriptStats[scriptName, "WARN"]
-                totalError += ScriptStats[scriptName, "ERROR"]
-                totalLoad += ScriptStats[scriptName, "LOAD"]
-                totalLogs += ScriptStats[scriptName, "total"]
-                
-                if (scriptNames)
-                    scriptNames .= ", "
-                scriptNames .= scriptName
-            }
-        }
-        
-        if (selectedScriptCount > 0) {
-            scriptStatsText := "Scripts selecionados: " . scriptNames
-                           . "`nTotal de logs: " . totalLogs
-                           . " | DEBUG: " . totalDebug
-                           . " | INFO: " . totalInfo
-                           . " | WARN: " . totalWarn
-                           . " | ERROR: " . totalError
-                           . " | LOAD: " . totalLoad
-        } else {
-            scriptStatsText := "Selecione um ou mais scripts para ver estatísticas"
+    if (scriptName && scriptName != "Todos" && ScriptStats.HasKey(scriptName)) {
+        debug := ScriptStats[scriptName, "DEBUG"]
+        info := ScriptStats[scriptName, "INFO"]
+        warn := ScriptStats[scriptName, "WARN"]
+        error := ScriptStats[scriptName, "ERROR"]
+        load := ScriptStats[scriptName, "LOAD"]
+        total := ScriptStats[scriptName, "total"]
+        if (total > 0) {
+            debugPct := Round((debug / total) * 100)
+            infoPct := Round((info / total) * 100)
+            warnPct := Round((warn / total) * 100)
+            errorPct := Round((error / total) * 100)
+            loadPct := Round((load / total) * 100)
+            scriptStatsText := "Script: " . scriptName 
+                            . " | Total de logs: " . total
+                            . "`nDEBUG: " . debug . " (" . debugPct . "%)"
+                            . " | INFO: " . info . " (" . infoPct . "%)"
+                            . " | WARN: " . warn . " (" . warnPct . "%)"
+                            . " | ERROR: " . error . " (" . errorPct . "%)"
+                            . " | LOAD: " . load . " (" . loadPct . "%)"
         }
     }
-    
     GuiControl,, StatsTextScript, %scriptStatsText%
 }
 
-ScriptListViewClick:
-    if (A_GuiEvent = "I") {  ; Item changed
-        LV_GetText(scriptName, A_EventInfo, 1)
-        isChecked := LV_GetNext(A_EventInfo - 1, "Checked") = A_EventInfo
-        
-        DebugLogSmart("[SERVER] Script clicado: '" scriptName "', Checked: " isChecked)
-        
-        ; Atualizar o status de seleção do script
-        SelectedScripts[scriptName] := isChecked
-        
-        ; Se "Todos" foi selecionado, marcar/desmarcar todos os outros scripts
-        if (scriptName = "Todos" && isChecked) {
-            ; Marcar todos os scripts
-            Loop % LV_GetCount()
-            {
-                LV_Modify(A_Index, "Check")
-                LV_GetText(currentScript, A_Index, 1)
-                SelectedScripts[currentScript] := true
-            }
-        } 
-        else if (scriptName = "Todos" && !isChecked) {
-            Loop % LV_GetCount()
-            {
-                LV_Modify(A_Index, "-Check")
-                LV_GetText(currentScript, A_Index, 1)
-                SelectedScripts[currentScript] := false
+ScriptsListViewChanged:
+    ; Este é o handler para quando o usuário clica em uma checkbox na ListView de scripts
+    if (A_GuiEvent = "C") {
+        ; O item foi modificado
+        LV_GetText(script, A_EventInfo)
+		Gui, Listview, ScriptsListView
+		Loop % LV_GetCount()
+			{
+				script := ""
+				isChecked := LV_GetNext(A_Index - 1, "Checked")
+				LV_GetText(script, A_Index, 1)
+				SelectedScripts[script] := isChecked = A_Index ? 1 : 0
+				OutputDebug, % script "`t" LV_GetNext(A_Index - 1, "Checked") "`t" isChecked
+			}
+        ; Se "Todos" foi alterado, atualize todas as outras checkboxes
+        Gui, ListView, ScriptsListView
+        if (SelectedScripts["Todos"] = 1) {
+            allChecked := true
+            Loop, % LV_GetCount() {
+                if (A_Index > 1) {  ; Pula o item "Todos"
+                    LV_GetText(rowScript, A_Index)
+                    SelectedScripts[rowScript] := 1
+                    LV_Modify(A_Index, "Check")
+                }
             }
         }
-        
-        UpdateScriptSpecificStats()
+		else {
+			If	allChecked {
+				allChecked := false
+				Loop, % LV_GetCount() {
+					if (A_Index > 1)	{
+						LV_GetText(rowScript, A_Index)
+						SelectedScripts[rowScript] := 0
+						LV_Modify(A_Index, "-Check")
+					}
+				}
+			}
+        }
+        UpdateScriptSpecificStats(script)
         ApplyFilters()
     }
 return
@@ -312,14 +319,13 @@ return
 ApplyFilters() {
     global g_aLogs, SearchText, SelectedScripts
     static lastSearchText := ""
-    static lastSelectedScripts := {}
     static lastChkDEBUG := ""
     static lastChkINFO := ""
     static lastChkWARN := ""
     static lastChkERROR := ""
     static lastChkLOAD := ""
     static lastLogsLength := 0
-    
+
     Gui, Submit, NoHide
     GuiControlGet, SearchText
     GuiControlGet, ChkDEBUG
@@ -327,23 +333,9 @@ ApplyFilters() {
     GuiControlGet, ChkWARN
     GuiControlGet, ChkERROR
     GuiControlGet, ChkLOAD
-    
-    ; Verificar se algo mudou
-    scriptsChanged := false
-    if (SelectedScripts.Count() != lastSelectedScripts.Count()) {
-        scriptsChanged := true
-    } else {
-        for script, isSelected in SelectedScripts {
-            if (!lastSelectedScripts.HasKey(script) || lastSelectedScripts[script] != isSelected) {
-                scriptsChanged := true
-                break
-            }
-        }
-    }
-    
-    ; Só atualiza se filtro mudou OU chegou novo log
+
+    ; Verificar se algo mudou para evitar atualizações desnecessárias
     if (  SearchText        != lastSearchText
-        || scriptsChanged
         || ChkDEBUG         != lastChkDEBUG
         || ChkINFO          != lastChkINFO
         || ChkWARN          != lastChkWARN
@@ -352,10 +344,6 @@ ApplyFilters() {
         || g_aLogs.Length() != lastLogsLength)
     {
         lastSearchText      := SearchText
-        lastSelectedScripts := {}
-        for script, isSelected in SelectedScripts {
-            lastSelectedScripts[script] := isSelected
-        }
         lastChkDEBUG        := ChkDEBUG
         lastChkINFO         := ChkINFO
         lastChkWARN         := ChkWARN
@@ -363,23 +351,23 @@ ApplyFilters() {
         lastChkLOAD         := ChkLOAD
         lastLogsLength      := g_aLogs.Length()
 
-		Gui, ListView, LogView
+        Gui, ListView, LogView
         LV_Delete()
         filteredCount := 0
-        
-        showAllScripts := SelectedScripts.HasKey("Todos") && SelectedScripts["Todos"]
 
         for index, item in g_aLogs {
             typeVar := "Chk" item.tipo
             showByType := %typeVar%
+
             showByText := (SearchText = "") 
-                       || InStr(item.mensagem, SearchText, false) 
-                       || InStr(item.script, SearchText, false)
-            showByScript := showAllScripts 
-                         || (SelectedScripts.HasKey(item.script) && SelectedScripts[item.script])
-            
+                      || InStr(item.mensagem, SearchText, false) 
+                      || InStr(item.script, SearchText, false)
+
+            showByScript := (SelectedScripts["Todos"] = 1) || (SelectedScripts[item.script] = 1)
+            ;If	!A_IsCompiled
+				;outputdebug % "Debug: showByType=" showByType ", showByText=" showByText ", showByScript=" showByScript
             if (showByType && showByText && showByScript) {
-                LV_Add("", item.timestamp, item.socket, item.ip, item.tipo, item.script, item.mensagem)
+                LV_Insert(filteredCount + 1, "", item.timestamp, item.socket, item.ip, item.tipo, item.script, item.mensagem)
                 filteredCount++
             }
         }
@@ -403,7 +391,7 @@ ClearLogs:
         }
     }
     UpdateStatsDisplay()
-    UpdateScriptSpecificStats()
+    UpdateScriptSpecificStats("")
 return
 
 ExportLogs:
@@ -414,17 +402,13 @@ ExportLogs:
     if !InStr(outputFile, ".csv")
         outputFile .= ".csv"
     fileContent := "Timestamp,Socket,IP,Tipo,Script,Mensagem`n"
-    
-    showAllScripts := SelectedScripts.HasKey("Todos") && SelectedScripts["Todos"]
-    
     for index, item in g_aLogs {
         typeVar := "Chk" item.tipo
         showByType := %typeVar%
         showByText := (SearchText = "") 
                    || InStr(item.mensagem, SearchText, false) 
                    || InStr(item.script, SearchText, false)
-        showByScript := showAllScripts 
-                     || (SelectedScripts.HasKey(item.script) && SelectedScripts[item.script])
+        showByScript := (SelectedScripts["Todos"] = 1) || (SelectedScripts[item.script] = 1)
         if (showByType && showByText && showByScript) {
             mensagemEscaped := RegExReplace(item.mensagem, """", """""")
             scriptEscaped := RegExReplace(item.script, """", """""")
@@ -443,9 +427,12 @@ ExportLogs:
     } else {
         MsgBox, 64, Sucesso, Logs exportados com sucesso para:`n%outputFile%
     }
-    return
+return
 
 ResizeListViewColumns() {
+    ; Garantir que estamos trabalhando com a ListView de logs
+    Gui, ListView, LogView
+    
     ; Larguras fixas das primeiras 5 colunas
     col1Width := 140  ; Timestamp
     col2Width := 60   ; Socket  
@@ -476,26 +463,23 @@ ResizeListViewColumns() {
 }
 
 GuiSize:
-    if (A_EventInfo = 1)  ; Se a janela está minimizada, não fazer nada
+    if (A_EventInfo = 1)
         return
     
-    ; Calcular novas dimensões
-    newScriptListHeight := A_GuiHeight - 200  ; Altura da ListView de scripts
-    newLogViewWidth := A_GuiWidth - 230       ; Largura da ListView de logs
-    newLogViewHeight := A_GuiHeight - 175     ; Altura da ListView de logs
+    ; Calcular nova largura e posição da ListView de scripts (esquerda)
+    scriptsListViewWidth := 200
+    newLogViewWidth := A_GuiWidth - scriptsListViewWidth - 30
+    newLogViewX := scriptsListViewWidth + 20
+    newHeight := A_GuiHeight - 175
     
-    ; Redimensionar a ListView de scripts
-    GuiControl, Move, ScriptListView, h%newScriptListHeight%
+    ; Redimensionar e reposicionar as ListViews
+    GuiControl, Move, ScriptsListView, % "w" . scriptsListViewWidth . " h" . newHeight
+    GuiControl, Move, LogView, % "x" . newLogViewX . " w" . newLogViewWidth . " h" . newHeight
     
-    ; Redimensionar a ListView de logs
-    GuiControl, Move, LogView, w%newLogViewWidth% h%newLogViewHeight%
-    
-    ; Redimensionar GroupBox
-    GuiControl, Move, Estatísticas, w%newLogViewWidth%
-    
-    ; Redimensionar as colunas
+    ; Redimensionar as colunas da ListView de logs
+    Gui, ListView, LogView
     ResizeListViewColumns()
-    return
+return
 
 GuiClose:
     DebugLogSmart("[SERVER] Encerrando servidor. Fechando todos sockets...")
