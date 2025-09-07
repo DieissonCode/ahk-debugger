@@ -30,7 +30,7 @@
 ; 3. Exporte os logs filtrados para CSV quando necessário
 
 #SingleInstance Force
-#Include socket.ahk
+#Include C:\Autohotkey 2024\Root\Libs\socket.ahk
 #Include C:\AutoHotkey\class\functions.ahk
 
 ; Configurações globais
