@@ -1,68 +1,72 @@
 ﻿; Logger.ahk - Versão simples e robusta para envio de logs
 #Include C:\Autohotkey 2024\Root\Libs\socket.ahk
+#Include C:\AutoHotkey\class\functions.ahk
 
 class Logger {
-    static HOST := "127.0.0.1"  ; Endereço do servidor
-    static PORTA := 4041        ; Porta do servidor
-    static g_Socket := -1       ; Socket de conexão
-    static scriptName := ""     ; Nome do script 
-    static isConnected := false ; Status da conexão
-    
-    ; Construtor - inicializa o logger com o nome do script
-    __New(scriptName) {
-        this.scriptName := scriptName
-        OutputDebug, % "[Logger] Inicializando para script: " this.scriptName
+    static HOST := "192.9.100.100"
+    static PORTA := 4041
+    static g_Socket := -1
+    static scriptName := ""
+    static isConnected := false
+
+    __New(obj="") {
+        this.scriptName := obj.name ? obj.name : A_IPAddress1 " - " A_ScriptName
+        this.HOST := obj.host ? obj.host : this.HOST
+        DebugLogSmart("[Logger] Inicializando para script: " this.scriptName)
         this.Connect()
     }
-    
-    ; Tenta conectar ao servidor
+
     Connect() {
-        OutputDebug, % "[Logger] Tentando conectar ao servidor em " this.HOST ":" this.PORTA
+        DebugLogSmart("[Logger] Tentando conectar ao servidor em " this.HOST ":" this.PORTA)
         err := AHKsock_Connect(this.HOST, this.PORTA, "LoggerSocketHandler")
         if (err) {
-            OutputDebug, % "[Logger] Falha ao conectar. Erro: " err
+            DebugLogSmart("[Logger] Falha ao conectar. Erro: " err)
             return false
         }
-        OutputDebug, % "[Logger] Solicitação de conexão enviada"
+        DebugLogSmart("[Logger] Solicitação de conexão enviada")
         return true
     }
-    
-    ; Método genérico para enviar logs
+
     Log(message, level := "INFO") {
         if (!this.isConnected) {
-            OutputDebug, % "[Logger] Não conectado. Tentando reconectar..."
-            if (!this.Connect())
-                return false
-            Sleep, 100 ; Pequena pausa para dar tempo à conexão
+			Try this.Connect()
+				if (!this.isConnected)	{
+          			DebugLogSmart("[Logger] Não conectado.`n`ttipo=" . level . "||scriptName=" . StrReplace(StrReplace(this.scriptName, ".ahk"), ".exe") . "||mensagem=" . message)
+            		return false
+				}
         }
         
-        ; Formata a string EXATAMENTE como em Debug-Client.ahk
-        dataStr := "tipo=" . level . "||scriptName=" . this.scriptName . "||mensagem=" . message
-        OutputDebug, % "[Logger] Enviando: " dataStr
-        
-        ; Converte a string para UTF-8
+        dataStr := "tipo=" . level . "||scriptName=" . StrReplace(StrReplace(this.scriptName, ".ahk"), ".exe") . "||mensagem=" . message
+        DebugLogSmart("[Logger] Enviando: " dataStr)
+
         VarSetCapacity(utf8, StrPut(dataStr, "UTF-8"))
         StrPut(dataStr, &utf8, "UTF-8")
         bytesToSend := StrPut(dataStr, "UTF-8") - 1
         
-        ; Envia usando o mesmo método do seu código original
         err := AHKsock_ForceSend(this.g_Socket, &utf8, bytesToSend)
         
         if (err) {
-            OutputDebug, % "[Logger] Erro ao enviar: " err
+            DebugLogSmart("[Logger] Erro ao enviar: " err)
             this.isConnected := false
             return false
         }
         
-        OutputDebug, % "[Logger] Log enviado com sucesso"
+        DebugLogSmart("[Logger] Log enviado com sucesso")
         return true
     }
-    
-    ; Métodos de conveniência para diferentes níveis de log
+
     Debug(message) {
         return this.Log(message, "DEBUG")
     }
-    
+
+    Error(message) {
+        return this.Log(message, "ERROR")
+    }
+
+    Load(message) {
+        return this.Log(message, "LOAD")
+    }
+
     Info(message) {
         return this.Log(message, "INFO")
     }
@@ -70,32 +74,24 @@ class Logger {
     Warn(message) {
         return this.Log(message, "WARN")
     }
-    
-    Error(message) {
-        return this.Log(message, "ERROR")
-    }
 }
 
-; Função para tratar eventos de socket (EXATAMENTE como DebugClientHandler)
 LoggerSocketHandler(sEvent, iSocket, sName, sAddr, sPort) {
-    OutputDebug, % "[Logger] Evento: " sEvent " | Socket: " iSocket
+    DebugLogSmart("[Logger] Evento: " sEvent " | Socket: " iSocket)
     
     if (sEvent = "CONNECTED") {
         if (iSocket != -1) {
-            ; Conexão bem-sucedida
             Logger.g_Socket := iSocket
             Logger.isConnected := true
-            OutputDebug, % "[Logger] Conectado com sucesso! Socket: " iSocket
+            DebugLogSmart("[Logger] Conectado com sucesso! Socket: " iSocket)
         } else {
-            ; Falha na conexão
             Logger.isConnected := false
-            OutputDebug, % "[Logger] Falha na conexão"
+            DebugLogSmart("[Logger] Falha na conexão")
         }
     }
     else if (sEvent = "DISCONNECTED") {
-        ; Marca como desconectado
         Logger.isConnected := false
         Logger.g_Socket := -1
-        OutputDebug, % "[Logger] Desconectado do servidor"
+        DebugLogSmart("[Logger] Desconectado do servidor")
     }
 }
