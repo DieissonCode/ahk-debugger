@@ -8,7 +8,7 @@
 
 ; ===== Logger-Server.ahk =====
 ; Servidor para recebimento, exibição e filtragem de logs
-; Versão: 1.2.0 - Com virtualização e limite de logs
+; Versão: 1.2.1 - Correções na virtualização
 ; Data: 2025-09-07
 ; Autor: Dieisson Code
 ; Repositório: https://github.com/DieissonCode/ahk-debugger
@@ -92,7 +92,7 @@ SysGet, MonitorWorkArea, MonitorWorkArea
 serverX := 10
 serverY := MonitorWorkAreaBottom - 550
 
-Gui, Show, x%serverX% y%serverY% w1050 h550, Logger Server v1.2.0
+Gui, Show, x%serverX% y%serverY% w1050 h550, Logger Server v1.2.1
 
 err := AHKsock_Listen(PORTA, "SocketEventHandler")
 DebugLogSmart("[SERVER] AHKsock_Listen chamado. Porta: " PORTA " | Resultado: " (err ? err : "Ativado"))
@@ -144,8 +144,8 @@ SocketEventHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLengt
         ; Aplicar limite de logs por script
         AddLogWithLimit(newMsg)
         
-        ; Aplicar filtros de forma otimizada
-        ApplyFiltersOptimized()
+        ; FORÇAR atualização da virtualização
+        ApplyFiltersOptimized(true)  ; true = força atualização
     }
     else if (sEvent = "DISCONNECTED") {
         iConnectedClients--
@@ -165,10 +165,11 @@ SocketEventHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLengt
         FormatTime, timestamp,, %TimestampFormat%
         disconnectMsg := {timestamp: timestamp, socket: iSocket, ip: sAddr, tipo: "INFO", script: scriptName, mensagem: "Script desconectado"}
         AddLogWithLimit(disconnectMsg)
-        ApplyFiltersOptimized()
+        ApplyFiltersOptimized(true)  ; true = força atualização
     }
 }
 
+; FUNÇÃO CORRIGIDA: AddLogWithLimit
 AddLogWithLimit(newMsg) {
     global g_aLogs, g_LogCounts, g_MaxLogsPerScript
     
@@ -178,26 +179,35 @@ AddLogWithLimit(newMsg) {
     if (!g_LogCounts.HasKey(scriptName))
         g_LogCounts[scriptName] := 0
     
-    ; Incrementar contador
+    ; SEMPRE adicionar o log no início do array primeiro
+    g_aLogs.InsertAt(1, newMsg)
     g_LogCounts[scriptName]++
     
-    ; Adicionar log no início do array
-    g_aLogs.InsertAt(1, newMsg)
+    DebugLogSmart("[SERVER] Log adicionado no início. Script: " scriptName " | Count: " g_LogCounts[scriptName] " | Total logs: " g_aLogs.Length())
     
     ; Verificar se excedeu o limite para este script
     if (g_LogCounts[scriptName] > g_MaxLogsPerScript) {
-        ; Encontrar e remover o log mais antigo deste script
+        logsRemovidos := 0
+        ; Procurar do fim para o início pelo log mais antigo deste script
         Loop, % g_aLogs.Length() {
             reverseIndex := g_aLogs.Length() - A_Index + 1
-            if (g_aLogs[reverseIndex].script = scriptName) {
-                g_aLogs.RemoveAt(reverseIndex)
-                g_LogCounts[scriptName]--
-                break
+            if (reverseIndex > 0 && reverseIndex <= g_aLogs.Length()) {
+                if (g_aLogs[reverseIndex].script = scriptName) {
+                    DebugLogSmart("[SERVER] Removendo log antigo. Script: " scriptName " | Pos: " reverseIndex " | Timestamp: " g_aLogs[reverseIndex].timestamp)
+                    g_aLogs.RemoveAt(reverseIndex)
+                    g_LogCounts[scriptName]--
+                    logsRemovidos++
+                    break
+                }
             }
+        }
+        
+        if (logsRemovidos = 0) {
+            DebugLogSmart("[SERVER] AVISO: Não foi possível encontrar log antigo para remover do script: " scriptName)
         }
     }
     
-    DebugLogSmart("[SERVER] Log adicionado. Script: " scriptName " | Count: " g_LogCounts[scriptName] " | Total logs: " g_aLogs.Length())
+    DebugLogSmart("[SERVER] AddLogWithLimit finalizada. Script: " scriptName " | Count final: " g_LogCounts[scriptName] " | Total logs: " g_aLogs.Length())
 }
 
 AddScriptToRegistry(scriptName) {
@@ -347,7 +357,7 @@ ScriptsListViewChanged:
             }
         }
         UpdateScriptSpecificStats(script)
-        ApplyFiltersOptimized()
+        ApplyFiltersOptimized(true)  ; Força atualização
     }
 return
 
@@ -358,7 +368,7 @@ SearchChanged:
 return
 
 ApplyFiltersTimer:
-    ApplyFiltersOptimized()
+    ApplyFiltersOptimized(true)  ; Força atualização
 return
 
 UpdateMaxLogs:
@@ -376,7 +386,7 @@ ApplyMaxLogs:
         g_MaxLogsPerScript := MaxLogsInput
         ; Reaplicar limite aos logs existentes
         TrimLogsToLimit()
-        ApplyFiltersOptimized()
+        ApplyFiltersOptimized(true)  ; Força atualização
         UpdateStatsDisplay()
         MsgBox, 64, Sucesso, Limite de logs aplicado: %g_MaxLogsPerScript% por script
     } else {
@@ -413,16 +423,16 @@ ToggleVirtualMode:
     GuiControlGet, VirtualMode
     g_VirtualMode := VirtualMode
     SB_SetText("Modo: " . (g_VirtualMode ? "Virtual" : "Padrão"), 4)
-    ApplyFiltersOptimized()
+    ApplyFiltersOptimized(true)  ; Força rebuild completo
 return
 
 ; LABELS NECESSÁRIOS PARA A GUI (mantidos para compatibilidade)
 ApplyFilters:
-    ApplyFiltersOptimized()
+    ApplyFiltersOptimized(false)  ; false = não força
 return
 
-; Função otimizada que substitui ApplyFilters()
-ApplyFiltersOptimized() {
+; FUNÇÃO CORRIGIDA: ApplyFiltersOptimized
+ApplyFiltersOptimized(forceUpdate := false) {
     global g_aLogs, SearchText, SelectedScripts, g_FilteredLogs, g_VirtualMode, g_LastScrollPos
     static lastSearchText := ""
     static lastChkDEBUG := ""
@@ -432,6 +442,7 @@ ApplyFiltersOptimized() {
     static lastChkLOAD := ""
     static lastLogsLength := 0
     static lastSelectedHash := ""
+    static lastLogsSignature := ""  ; Para detectar mudanças no conteúdo
 
     Gui, Submit, NoHide
     GuiControlGet, SearchText
@@ -447,18 +458,59 @@ ApplyFiltersOptimized() {
         selectedHash .= script . ":" . isSelected . "|"
     }
 
+    ; Gerar "assinatura" dos logs para detectar mudanças no conteúdo
+    logsSignature := ""
+    if (g_aLogs.Length() > 0) {
+        logsSignature := g_aLogs[1].timestamp . "|" . g_aLogs[1].script . "|" . g_aLogs.Length()
+    }
+
     ; Verificar se precisa atualizar
-    needsUpdate := false
-    if (  SearchText != lastSearchText
-        || ChkDEBUG != lastChkDEBUG
-        || ChkINFO != lastChkINFO
-        || ChkWARN != lastChkWARN
-        || ChkERROR != lastChkERROR
-        || ChkLOAD != lastChkLOAD
-        || g_aLogs.Length() != lastLogsLength
-        || selectedHash != lastSelectedHash)
-    {
-        needsUpdate := true
+    needsUpdate := forceUpdate
+    changeReason := ""
+    
+    if (!needsUpdate) {
+        if (SearchText != lastSearchText) {
+            needsUpdate := true
+            changeReason .= "SearchText "
+        }
+        if (ChkDEBUG != lastChkDEBUG) {
+            needsUpdate := true
+            changeReason .= "DEBUG "
+        }
+        if (ChkINFO != lastChkINFO) {
+            needsUpdate := true
+            changeReason .= "INFO "
+        }
+        if (ChkWARN != lastChkWARN) {
+            needsUpdate := true
+            changeReason .= "WARN "
+        }
+        if (ChkERROR != lastChkERROR) {
+            needsUpdate := true
+            changeReason .= "ERROR "
+        }
+        if (ChkLOAD != lastChkLOAD) {
+            needsUpdate := true
+            changeReason .= "LOAD "
+        }
+        if (g_aLogs.Length() != lastLogsLength) {
+            needsUpdate := true
+            changeReason .= "LogsLength(" . (g_aLogs.Length() - lastLogsLength) . ") "
+        }
+        if (selectedHash != lastSelectedHash) {
+            needsUpdate := true
+            changeReason .= "SelectedScripts "
+        }
+        if (logsSignature != lastLogsSignature) {
+            needsUpdate := true
+            changeReason .= "LogsContent "
+        }
+    } else {
+        changeReason := "ForceUpdate "
+    }
+
+    if (needsUpdate) {
+        DebugLogSmart("[SERVER] ApplyFiltersOptimized: " . changeReason . "| Array: " . g_aLogs.Length() . " | ListView: " . LV_GetCount())
         
         ; Salvar estado
         lastSearchText := SearchText
@@ -469,10 +521,9 @@ ApplyFiltersOptimized() {
         lastChkLOAD := ChkLOAD
         lastLogsLength := g_aLogs.Length()
         lastSelectedHash := selectedHash
-    }
+        lastLogsSignature := logsSignature
 
-    if (needsUpdate) {
-        ; Salvar posição do scroll
+        ; Salvar posição do scroll antes de atualizar
         Gui, ListView, LogView
         currentFocus := LV_GetNext(0, "Focused")
         if (currentFocus > 0)
@@ -485,13 +536,17 @@ ApplyFiltersOptimized() {
         }
 
         SB_SetText("Logs exibidos: " . LV_GetCount() . " / " . g_aLogs.Length(), 1)
+        DebugLogSmart("[SERVER] Atualização concluída. ListView agora tem: " . LV_GetCount() . " itens")
     }
 }
 
+; FUNÇÃO CORRIGIDA: UpdateVirtualListView
 UpdateVirtualListView() {
     global g_aLogs, g_FilteredLogs, SearchText, SelectedScripts, g_LastScrollPos
     
-    ; Filtrar logs uma vez e armazenar os índices
+    DebugLogSmart("[SERVER] UpdateVirtualListView iniciada. g_aLogs: " . g_aLogs.Length())
+    
+    ; SEMPRE recriar o array filtrado
     g_FilteredLogs := []
     
     for index, item in g_aLogs {
@@ -500,22 +555,40 @@ UpdateVirtualListView() {
         }
     }
     
-    ; Usar estratégia baseada no tamanho da mudança
+    DebugLogSmart("[SERVER] Array filtrado criado. g_FilteredLogs: " . g_FilteredLogs.Length())
+    
     Gui, ListView, LogView
     currentCount := LV_GetCount()
     newCount := g_FilteredLogs.Length()
     
-    ; Se a diferença for pequena, fazer update incremental
-    if (Abs(newCount - currentCount) <= 50 && currentCount > 0) {
-        UpdateListViewIncremental()
-    } else {
-        ; Rebuild completo apenas quando necessário
+    DebugLogSmart("[SERVER] ListView atual: " . currentCount . " | Novo filtrado: " . newCount)
+    
+    ; ESTRATÉGIA SIMPLIFICADA: Para garantir que funciona, sempre fazer rebuild quando há mudanças significativas
+    if (Abs(newCount - currentCount) > 5 || currentCount = 0) {
+        DebugLogSmart("[SERVER] Fazendo rebuild completo (diferença > 5 ou lista vazia)")
         RebuildListView()
+    } else {
+        ; Verificar se o primeiro item ainda é válido
+        firstItemValid := false
+        if (currentCount > 0 && newCount > 0) {
+            LV_GetText(lvTimestamp, 1, 1)
+            LV_GetText(lvScript, 1, 5)
+            firstItemValid := (g_FilteredLogs[1].timestamp = lvTimestamp && g_FilteredLogs[1].script = lvScript)
+        }
+        
+        if (firstItemValid) {
+            DebugLogSmart("[SERVER] Primeiro item válido, tentando update incremental")
+            UpdateListViewIncremental()
+        } else {
+            DebugLogSmart("[SERVER] Primeiro item inválido, fazendo rebuild")
+            RebuildListView()
+        }
     }
     
-    ; Tentar restaurar posição do scroll
+    ; Restaurar scroll
     if (g_LastScrollPos > 0 && g_LastScrollPos <= LV_GetCount()) {
         LV_Modify(g_LastScrollPos, "Focus")
+        DebugLogSmart("[SERVER] Scroll restaurado para posição: " . g_LastScrollPos)
     }
 }
 
@@ -525,66 +598,65 @@ UpdateStandardListView() {
     Gui, ListView, LogView
     LV_Delete()
     
+    filteredCount := 0
     for index, item in g_aLogs {
         if (ShouldShowItem(item)) {
             LV_Add("", item.timestamp, item.socket, item.ip, item.tipo, item.script, item.mensagem)
+            filteredCount++
         }
     }
+    
+    DebugLogSmart("[SERVER] UpdateStandardListView: " . filteredCount . " itens adicionados")
 }
 
+; FUNÇÃO CORRIGIDA: UpdateListViewIncremental
 UpdateListViewIncremental() {
     global g_FilteredLogs
     
     Gui, ListView, LogView
+    currentCount := LV_GetCount()
+    targetCount := g_FilteredLogs.Length()
     
-    ; Verificar se os primeiros itens ainda são válidos
-    itemsToCheck := Min(LV_GetCount(), 20)  ; Verificar apenas os primeiros 20 itens
-    validItems := 0
+    DebugLogSmart("[SERVER] UpdateListViewIncremental: atual=" . currentCount . " alvo=" . targetCount)
     
-    Loop, %itemsToCheck% {
-        LV_GetText(timestamp, A_Index, 1)
-        LV_GetText(script, A_Index, 5)
+    ; Se precisamos adicionar itens
+    if (targetCount > currentCount) {
+        itemsToAdd := targetCount - currentCount
+        DebugLogSmart("[SERVER] Adicionando " . itemsToAdd . " itens no topo")
         
-        if (A_Index <= g_FilteredLogs.Length()) {
+        ; Adicionar novos itens no topo (os mais recentes)
+        Loop, %itemsToAdd% {
             item := g_FilteredLogs[A_Index]
-            if (item.timestamp = timestamp && item.script = script) {
-                validItems++
-            } else {
-                break
-            }
+            LV_Insert(1, "", item.timestamp, item.socket, item.ip, item.tipo, item.script, item.mensagem)
+        }
+    }
+    ; Se precisamos remover itens
+    else if (targetCount < currentCount) {
+        itemsToRemove := currentCount - targetCount
+        DebugLogSmart("[SERVER] Removendo " . itemsToRemove . " itens do final")
+        
+        Loop, %itemsToRemove% {
+            LV_Delete(LV_GetCount())
         }
     }
     
-    ; Se muitos itens são inválidos, fazer rebuild
-    if (validItems < itemsToCheck / 2) {
-        RebuildListView()
-        return
-    }
-    
-    ; Adicionar novos itens no topo
-    newItems := g_FilteredLogs.Length() - LV_GetCount()
-    if (newItems > 0) {
-        Loop, %newItems% {
-            item := g_FilteredLogs[A_Index]
-            LV_Insert(A_Index, "", item.timestamp, item.socket, item.ip, item.tipo, item.script, item.mensagem)
-        }
-    }
-    
-    ; Remover itens excedentes no final
-    while (LV_GetCount() > g_FilteredLogs.Length()) {
-        LV_Delete(LV_GetCount())
-    }
+    DebugLogSmart("[SERVER] UpdateListViewIncremental finalizada. ListView: " . LV_GetCount() . " itens")
 }
 
+; FUNÇÃO CORRIGIDA: RebuildListView
 RebuildListView() {
     global g_FilteredLogs
     
     Gui, ListView, LogView
     LV_Delete()
     
+    DebugLogSmart("[SERVER] RebuildListView: Adicionando " . g_FilteredLogs.Length() . " itens")
+    
     for index, item in g_FilteredLogs {
         LV_Add("", item.timestamp, item.socket, item.ip, item.tipo, item.script, item.mensagem)
     }
+    
+    DebugLogSmart("[SERVER] RebuildListView finalizada. ListView: " . LV_GetCount() . " itens")
 }
 
 ShouldShowItem(item) {
