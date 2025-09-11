@@ -1,6 +1,6 @@
 ﻿;Save_To_Sql=1
 ;Keep_Versions=5
-;@Ahk2Exe-Let U_FileVersion=0.1.3.0
+;@Ahk2Exe-Let U_FileVersion=0.1.3.1
 ;@Ahk2Exe-SetFileVersion %U_FileVersion%
 ;@Ahk2Exe-Let U_C=KAH - Logger de Execução de Sistemas
 ;@Ahk2Exe-SetDescription %U_C%
@@ -8,7 +8,7 @@
 
 ; ===== Logger-Server.ahk =====
 ; Servidor para recebimento, exibição e filtragem de logs
-; Versão: 1.3.0 - Limite global/individual de logs por script
+; Versão: 1.3.1 - Versão simplificada com limite global + Buffer WARN/ERROR
 ; Data: 2025-09-09
 ; Autor: Dieisson Code
 ; Repositório: https://github.com/DieissonCode/ahk-debugger
@@ -26,72 +26,89 @@ global SearchText := ""
 global ActiveScripts := []
 global SelectedScripts := {}
 global g_FilteredLogs := []
-global g_MaxLogsPerScript := 300      ; Limite padrão de logs por script
-global g_UseGlobalLimit := true       ; NOVO: Aplica limite global por padrão
-global g_IndividualLimits := {}       ; NOVO: Limite individual por script
-global g_LogCounts := {}              ; Contador de logs por script
+global g_MaxLogsPerScript := 10
+global g_LogCounts := {}
 global iConnectedClients := 0
 global iLogsReceived := 0
 global ScriptStats := {}
 global g_VirtualMode := true
 global g_LastScrollPos := 1
+global g_LastSelectedScript := ""
+global g_UpdateThreshold := 15
+global g_PendingUpdate := false
+global g_LastFilterChange := 0
+global g_ListViewPaused := false
+global g_WarnErrorBuffer := []
+global g_MaxWarnErrorBuffer := 50
 
 DebugLogSmart("[SERVER] Script inicializado.")
 
-; GUI
-Gui, +Resize +MinSize480x300 +AlwaysOnTop
+; GUI - Interface otimizada com espaçamento correto para StatusBar
+Gui, +Resize +MinSize580x420 +AlwaysOnTop
 Gui, Color, FFFFFF
 Gui, Font, s10, Segoe UI
 
-Gui, Add, Text, x10 y10 w300, Servidor de Log (Porta: %PORTA%)
-Gui, Add, Button, x+10 w80 h25 gClearLogs, Limpar
-Gui, Add, Button, x+10 w100 h25 gExportLogs, Exportar Logs
+Gui, Add, Text, x10 y10 w350 h25, Servidor de Log (Porta: %PORTA%)
+Gui, Add, Button, x+15 w90 h35 gClearLogs, Limpar
+Gui, Add, Button, x+10 w120 h35 gExportLogs, Exportar Logs
+Gui, Add, Button, x+10 w140 h35 gShowWarnErrorBuffer, Analisar WARN/ERROR
 
-Gui, Add, GroupBox, x10 y40 w410 h160, Filtros e Configurações
+Gui, Add, GroupBox, x10 y55 w520 h180, Filtros e Configurações
 
-Gui, Add, Checkbox, x20 y60 w80 h20 vChkDEBUG gApplyFilters Checked, DEBUG
-Gui, Add, Checkbox, x+5 w80 h20 vChkINFO gApplyFilters Checked, INFO
-Gui, Add, Checkbox, x+5 w80 h20 vChkWARN gApplyFilters Checked, WARN
-Gui, Add, Checkbox, x+5 w80 h20 vChkERROR gApplyFilters Checked, ERROR
-Gui, Add, Checkbox, x+5 w50 h20 vChkLOAD gApplyFilters Checked, LOAD
+; Filtros de tipo
+Gui, Add, Checkbox, x20 y80 w85 h25 vChkDEBUG gApplyFilters Checked, DEBUG
+Gui, Add, Checkbox, x+5 w85 h25 vChkINFO gApplyFilters Checked, INFO
+Gui, Add, Checkbox, x+5 w85 h25 vChkWARN gApplyFilters Checked, WARN
+Gui, Add, Checkbox, x+5 w85 h25 vChkERROR gApplyFilters Checked, ERROR
+Gui, Add, Checkbox, x+5 w60 h25 vChkLOAD gApplyFilters Checked, LOAD
 
-Gui, Add, Text, x20 y90 w60, Buscar:
-Gui, Add, Edit, x+5 w200 h20 vSearchText gSearchChanged, 
+; Campo de busca
+Gui, Add, Text, x20 y110 w70 h25, Buscar:
+Gui, Add, Edit, x95 y107 w370 h25 vSearchText gSearchChanged, 
 
-Gui, Add, Text, x20 y115 w100, Limite logs/script:
-Gui, Add, Edit, x125 y112 w60 h20 vMaxLogsInput gUpdateMaxLogs Number, %g_MaxLogsPerScript%
-Gui, Add, Button, x190 y111 w50 h22 gApplyMaxLogs, Aplicar
+; Limite logs/script global
+Gui, Add, Text, x20 y140 w120 h25, Limite logs/script:
+Gui, Add, Edit, x145 y137 w80 h25 vMaxLogsInput gUpdateMaxLogs Number, %g_MaxLogsPerScript%
+Gui, Add, Button, x230 y136 w70 h27 gApplyMaxLogs, Aplicar
 
-; Limite global/individual
-Gui, Add, Checkbox, x20 y140 w180 h20 vUseGlobalLimit gToggleGlobalLimit Checked, Limite global para todos os scripts
-Gui, Add, Button, x210 y139 w90 h22 gConfigIndividualLimits, Configurar scripts...
+; Modo virtualizado e PAUSA
+Gui, Add, Checkbox, x20 y170 w160 h25 vVirtualMode gToggleVirtualMode Checked, Modo Virtualizado
+Gui, Add, Checkbox, x200 y170 w180 h25 vPauseListView gTogglePauseListView, Pausar atualização
 
-Gui, Add, Checkbox, x310 y140 w140 h20 vVirtualMode gToggleVirtualMode Checked, Modo Virtualizado
+; Indicador visual de pausa
+Gui, Add, Text, x390 y170 w120 h25 vPauseIndicator Center +Border, PAUSADO
+GuiControl, Hide, PauseIndicator
 
-Gui, Add, ListView, x10 y210 w200 r20 vScriptsListView +Checked gScriptsListViewChanged AltSubmit, Scripts
+; Scripts ListView
+Gui, Add, ListView, x10 y245 w250 r18 vScriptsListView +Checked +LV0x10000 gScriptsListViewChanged AltSubmit, Scripts
 LV_Add("", "Todos")
 SelectedScripts["Todos"] := 0
 
-Gui, Add, GroupBox, x440 y40 w600 h160, Estatísticas
-Gui, Add, Text, x460 y60 w580 vStatsTextGlobal, Scripts conectados: 0 | Logs recebidos: 0
-Gui, Add, Text, x460 y85 w580 h2 0x10
-Gui, Add, Text, x460 y95 w580 h100 vStatsTextScript, Selecione um script para ver estatísticas específicas
+; Estatísticas - Layout corrigido
+Gui, Add, GroupBox, x550 y55 w650 h180, Estatísticas
+Gui, Add, Text, x570 y80 w620 h45 vStatsTextGlobal, Scripts conectados: 0 | Logs armazenados: 0 (processados: 0)
+Gui, Add, Text, x570 y130 w620 h2 0x10
+Gui, Add, Text, x570 y140 w620 h85 vStatsTextScript, Selecione um script específico para ver estatísticas detalhadas
 
-Gui, Add, ListView, x220 y210 w750 r20 vLogView -Multi Grid, Timestamp|Socket|IP|Tipo|Script|Mensagem
+; ListView com espaço adequado para StatusBar (+5px)
+Gui, Add, ListView, x270 y245 w880 r18 vLogView -Multi +Grid +LV0x10000, Timestamp|Socket|IP|Tipo|Script|Mensagem
 ResizeListViewColumns()
 
 Gui, Add, StatusBar
-SB_SetParts(200, 150, 200, 150)
+SB_SetParts(200, 150, 200, 180)
 SB_SetText("Logs recebidos: 0", 1)
 SB_SetText("Clientes conectados: 0", 2)
 SB_SetText("Scripts únicos: 0", 3)
-SB_SetText("Modo: Virtual", 4)
+SB_SetText("Status: Ativo | WARN/ERROR: 0", 4)
 
 SysGet, MonitorWorkArea, MonitorWorkArea
 serverX := 10
-serverY := MonitorWorkAreaBottom - 570
+serverY := MonitorWorkAreaBottom - 700
 
-Gui, Show, x%serverX% y%serverY% w1050 h570, Logger Server v1.3.0
+Gui, Show, x%serverX% y%serverY% w1220 h700, Logger Server v1.3.1
+
+; Timer para processar updates pendentes
+SetTimer, ProcessPendingUpdates, 500
 
 err := AHKsock_Listen(PORTA, "SocketEventHandler")
 DebugLogSmart("[SERVER] AHKsock_Listen chamado. Porta: " PORTA " | Resultado: " (err ? err : "Ativado"))
@@ -101,6 +118,15 @@ if (err) {
     ExitApp
 }
 Return
+
+; Timer para processar updates pendentes (reduz rebuilds desnecessários)
+ProcessPendingUpdates:
+    global g_PendingUpdate, g_LastFilterChange
+    if (g_PendingUpdate && A_TickCount - g_LastFilterChange > 800) {
+        g_PendingUpdate := false
+        ApplyFiltersOptimized(true)
+    }
+return
 
 SocketEventHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLength) {
     global iConnectedClients, iLogsReceived, g_aLogs, ActiveScripts, ScriptStats
@@ -133,8 +159,18 @@ SocketEventHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLengt
         SB_SetText("Logs recebidos: " iLogsReceived, 1)
         
         newMsg := {timestamp: timestamp, socket: iSocket, ip: sAddr, tipo: tipo, script: scriptName, mensagem: mensagem}
-        AddLogWithLimit(newMsg)
-        ApplyFiltersOptimized(true)
+        
+        ; Adiciona ao buffer WARN/ERROR se necessário
+        AddToWarnErrorBuffer(newMsg)
+        
+        wasRemoved := AddLogWithLimit(newMsg)
+        
+        ; Só atualiza ListView se não estiver pausado
+        if (!g_ListViewPaused) {
+            ApplyFiltersSmartUpdate(newMsg, wasRemoved)
+        }
+        
+        UpdateScriptSpecificStatsIfSelected(scriptName)
     }
     else if (sEvent = "DISCONNECTED") {
         iConnectedClients--
@@ -151,101 +187,360 @@ SocketEventHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLengt
         }
         FormatTime, timestamp,, %TimestampFormat%
         disconnectMsg := {timestamp: timestamp, socket: iSocket, ip: sAddr, tipo: "INFO", script: scriptName, mensagem: "Script desconectado"}
-        AddLogWithLimit(disconnectMsg)
-        ApplyFiltersOptimized(true)
+        wasRemoved := AddLogWithLimit(disconnectMsg)
+        
+        ; Só atualiza ListView se não estiver pausado
+        if (!g_ListViewPaused) {
+            ApplyFiltersSmartUpdate(disconnectMsg, wasRemoved)
+        }
     }
 }
 
-; --------- Limite global/individual ---------
-GetLimitForScript(scriptName) {
-    global g_UseGlobalLimit, g_MaxLogsPerScript, g_IndividualLimits
-    if (g_UseGlobalLimit)
-        return g_MaxLogsPerScript
-    else
-        return g_IndividualLimits.HasKey(scriptName) ? g_IndividualLimits[scriptName] : 300
+; Adiciona WARN e ERROR ao buffer separado
+AddToWarnErrorBuffer(newMsg) {
+    global g_WarnErrorBuffer, g_MaxWarnErrorBuffer
+    
+    if (newMsg.tipo = "WARN" || newMsg.tipo = "ERROR") {
+        ; Adiciona no início do array
+        g_WarnErrorBuffer.InsertAt(1, newMsg)
+        
+        ; Remove excesso se necessário
+        while (g_WarnErrorBuffer.Length() > g_MaxWarnErrorBuffer) {
+            g_WarnErrorBuffer.RemoveAt(g_WarnErrorBuffer.Length())
+        }
+        
+        ; Atualiza StatusBar
+        UpdateWarnErrorCount()
+        DebugLogSmart("[SERVER] Adicionado ao buffer WARN/ERROR: " . newMsg.tipo . " - " . newMsg.script)
+    }
 }
 
-AddLogWithLimit(newMsg) {
-    global g_aLogs, g_LogCounts
+; Atualiza contador WARN/ERROR na StatusBar
+UpdateWarnErrorCount() {
+    global g_WarnErrorBuffer, g_ListViewPaused
+    warnCount := 0
+    errorCount := 0
+    
+    for _, item in g_WarnErrorBuffer {
+        if (item.tipo = "WARN")
+            warnCount++
+        else if (item.tipo = "ERROR")
+            errorCount++
+    }
+    
+    statusText := "Status: " . (g_ListViewPaused ? "Pausado" : "Ativo") 
+                . " | W:" . warnCount . "/E:" . errorCount . " (" . g_WarnErrorBuffer.Length() . "/50)"
+    SB_SetText(statusText, 4)
+}
 
-    scriptName := newMsg.script
-    if (!g_LogCounts.HasKey(scriptName))
-        g_LogCounts[scriptName] := 0
+; Exibe janela de análise de WARN/ERROR
+ShowWarnErrorBuffer:
+    global g_WarnErrorBuffer
+    
+    if (g_WarnErrorBuffer.Length() = 0) {
+        MsgBox, 64, Buffer WARN/ERROR, Nenhum evento WARN ou ERROR foi registrado ainda.
+        return
+    }
+    
+    ; Criar GUI de análise
+    Gui, WarnError:+Resize +MinSize600x400 +AlwaysOnTop
+    Gui, WarnError:Color, FFFFFF
+    Gui, WarnError:Font, s10, Segoe UI
+    
+    ; Título e estatísticas
+    warnCount := 0
+    errorCount := 0
+    for _, item in g_WarnErrorBuffer {
+        if (item.tipo = "WARN")
+            warnCount++
+        else if (item.tipo = "ERROR")
+            errorCount++
+    }
+    
+    titleText := "Análise de WARN/ERROR - Total: " . g_WarnErrorBuffer.Length() 
+               . " (WARN: " . warnCount . " | ERROR: " . errorCount . ")"
+    Gui, WarnError:Add, Text, x10 y10 w580 h25 Center, %titleText%
+    
+    ; Filtros específicos
+    Gui, WarnError:Add, GroupBox, x10 y40 w580 h50, Filtros
+    Gui, WarnError:Add, Checkbox, x20 y60 w80 h25 vWEChkWARN gFilterWarnError Checked, WARN
+    Gui, WarnError:Add, Checkbox, x+20 w80 h25 vWEChkERROR gFilterWarnError Checked, ERROR
+    Gui, WarnError:Add, Text, x+20 w60 h25, Script:
+    Gui, WarnError:Add, ComboBox, x+5 w150 h200 vWEScriptFilter gFilterWarnError, Todos
+    
+    ; Preencher ComboBox com scripts únicos
+    scriptsInBuffer := {}
+    for _, item in g_WarnErrorBuffer {
+        scriptsInBuffer[item.script] := true
+    }
+    for script in scriptsInBuffer {
+        GuiControl, WarnError:, WEScriptFilter, %script%
+    }
+    
+    ; ListView dos eventos - POSICIONAMENTO CORRETO
+    Gui, WarnError:Add, ListView, x10 y100 w580 r20 vWELogView -Multi +Grid, Timestamp|Tipo|Script|Mensagem
+    
+    ; Calcular posição Y correta para os botões
+    ; Y da ListView (100) + altura da ListView (20 linhas * 16px + header + bordas) ≈ 100 + 340 = 440
+    buttonY := 450
+    
+    ; Botões na posição correta
+    Gui, WarnError:Add, Button, x10 y%buttonY% w100 h30 gExportWarnError, Exportar CSV
+    Gui, WarnError:Add, Button, x120 y%buttonY% w100 h30 gClearWarnError, Limpar Buffer
+    Gui, WarnError:Add, Button, x490 y%buttonY% w100 h30 gCloseWarnError, Fechar
+    
+    ; Altura total da janela
+    totalHeight := buttonY + 45
+    
+    ; Posicionar janela
+    Gui, WarnError:Show, w600 h%totalHeight%, Análise WARN/ERROR
+    
+    ; Preencher ListView inicial
+    FilterWarnErrorList()
+return
 
-    g_aLogs.InsertAt(1, newMsg)
-    g_LogCounts[scriptName]++
+; Filtros da janela WARN/ERROR
+FilterWarnError:
+    FilterWarnErrorList()
+return
 
-    limit := GetLimitForScript(scriptName)
-    if (g_LogCounts[scriptName] > limit) {
-        Loop, % g_aLogs.Length() {
-            reverseIndex := g_aLogs.Length() - A_Index + 1
-            if (g_aLogs[reverseIndex].script = scriptName) {
-                g_aLogs.RemoveAt(reverseIndex)
-                g_LogCounts[scriptName]--
+FilterWarnErrorList() {
+    global g_WarnErrorBuffer
+    
+    Gui, WarnError:Submit, NoHide
+    
+    ; CORRIGIDO: Definir a ListView correta antes de popular
+    Gui, WarnError:ListView, WELogView
+    LV_Delete()
+    
+    ; Filtrar e adicionar itens
+    for _, item in g_WarnErrorBuffer {
+        showItem := true
+        
+        ; Filtro por tipo
+        if (item.tipo = "WARN" && !WEChkWARN)
+            showItem := false
+        if (item.tipo = "ERROR" && !WEChkERROR)
+            showItem := false
+        
+        ; Filtro por script
+        if (WEScriptFilter != "Todos" && item.script != WEScriptFilter)
+            showItem := false
+        
+        if (showItem) {
+            LV_Add("", item.timestamp, item.tipo, item.script, item.mensagem)
+        }
+    }
+    
+    ; Redimensionar colunas
+    LV_ModifyCol(1, 140)  ; Timestamp
+    LV_ModifyCol(2, 60)   ; Tipo
+    LV_ModifyCol(3, 120)  ; Script
+    LV_ModifyCol(4, 240)  ; Mensagem
+}
+
+; Exportar buffer WARN/ERROR
+ExportWarnError:
+    global g_WarnErrorBuffer
+    
+    FormatTime, timestamp,, yyyy-MM-dd_HHmmss
+    FileSelectFile, outputFile, S16, %A_Desktop%\warn_error_analysis_%timestamp%.csv, Exportar WARN/ERROR, CSV Files (*.csv)
+    if (outputFile = "")
+        return
+    if !InStr(outputFile, ".csv")
+        outputFile .= ".csv"
+    
+    fileContent := "Timestamp,Tipo,Script,Mensagem`n"
+    for _, item in g_WarnErrorBuffer {
+        mensagemEscaped := RegExReplace(item.mensagem, """", """""")
+        scriptEscaped := RegExReplace(item.script, """", """""")
+        fileContent .= item.timestamp . ","
+                    . item.tipo . ","
+                    . """" . scriptEscaped . """" . ","
+                    . """" . mensagemEscaped . """`n"
+    }
+    
+    FileDelete, %outputFile%
+    FileAppend, %fileContent%, %outputFile%, UTF-8
+    
+    if (!ErrorLevel) {
+        MsgBox, 64, Exportação, Eventos WARN/ERROR exportados com sucesso!`n%outputFile%
+    }
+return
+
+; Limpar buffer WARN/ERROR
+ClearWarnError:
+    MsgBox, 36, Confirmação, Tem certeza que deseja limpar o buffer de WARN/ERROR?`n`nEsta ação não pode ser desfeita.
+    IfMsgBox, Yes
+    {
+        g_WarnErrorBuffer := []
+        UpdateWarnErrorCount()
+        FilterWarnErrorList()
+        DebugLogSmart("[SERVER] Buffer WARN/ERROR limpo")
+    }
+return
+
+; Fechar janela de análise
+CloseWarnError:
+    Gui, WarnError:Destroy
+return
+
+; Toggle para pausar/despausar atualização da ListView
+TogglePauseListView:
+    GuiControlGet, PauseListView
+    g_ListViewPaused := PauseListView
+    
+    if (g_ListViewPaused) {
+        ; Pausado - mostra indicador visual
+        GuiControl, Show, PauseIndicator
+        GuiControl,, PauseIndicator, ⏸ PAUSADO
+        UpdateWarnErrorCount()
+        DebugLogSmart("[SERVER] ListView pausada")
+    } else {
+        ; Despausado - esconde indicador e força atualização
+        GuiControl, Hide, PauseIndicator
+        UpdateWarnErrorCount()
+        DebugLogSmart("[SERVER] ListView despausada - forçando atualização")
+        ; Força rebuild completo para sincronizar com logs acumulados
+        ApplyFiltersOptimized(true)
+    }
+return
+
+; Update inteligente que limpa logs antigos sem rebuild
+ApplyFiltersSmartUpdate(newItem, wasLogRemoved := false) {
+    global g_aLogs, g_FilteredLogs, g_VirtualMode, g_ListViewPaused
+    
+    ; Se pausado, não atualiza a ListView
+    if (g_ListViewPaused) {
+        return
+    }
+    
+    if (!g_VirtualMode) {
+        ApplyFiltersOptimized(true)
+        return
+    }
+    
+    Gui, ListView, LogView
+    
+    ; Se um log foi removido dos dados, precisa sincronizar a ListView
+    if (wasLogRemoved) {
+        ; Remove item mais antigo da ListView (se existir na visualização)
+        RemoveOldestFromListView(newItem.script)
+    }
+    
+    ; Verifica se o novo log passaria pelos filtros atuais
+    if (ShouldShowItem(newItem)) {
+        ; Adiciona o novo item no topo da ListView
+        LV_Insert(1, "", newItem.timestamp, newItem.socket, newItem.ip, newItem.tipo, newItem.script, newItem.mensagem)
+        g_FilteredLogs.InsertAt(1, newItem)
+        
+        ; Atualiza status bar
+        SB_SetText("Logs exibidos: " . LV_GetCount() . " / " . g_aLogs.Length(), 1)
+    }
+}
+
+; Remove o item mais antigo do mesmo script da ListView
+RemoveOldestFromListView(scriptName) {
+    global g_FilteredLogs
+    
+    Gui, ListView, LogView
+    
+    ; Procura o item mais antigo do mesmo script na ListView (de baixo para cima)
+    Loop, % LV_GetCount() {
+        reverseIndex := LV_GetCount() - A_Index + 1
+        if (reverseIndex > 0) {
+            LV_GetText(lvScript, reverseIndex, 5)  ; Coluna 5 = Script
+            if (lvScript = scriptName) {
+                ; Remove da ListView e do array filtrado
+                LV_Delete(reverseIndex)
+                if (reverseIndex <= g_FilteredLogs.Length()) {
+                    g_FilteredLogs.RemoveAt(reverseIndex)
+                }
                 break
             }
         }
     }
 }
 
+; --------- Limite global simplificado ---------
+AddLogWithLimit(newMsg) {
+    global g_aLogs, g_LogCounts, g_MaxLogsPerScript
+
+    scriptName := newMsg.script
+    if (!g_LogCounts.HasKey(scriptName))
+        g_LogCounts[scriptName] := 0
+
+    wasRemoved := false
+    
+    ; Remove logs antigos se necessário ANTES de adicionar
+    if (g_LogCounts[scriptName] >= g_MaxLogsPerScript) {
+        Loop, % g_aLogs.Length() {
+            reverseIndex := g_aLogs.Length() - A_Index + 1
+            if (reverseIndex > 0 && g_aLogs[reverseIndex].script = scriptName) {
+                g_aLogs.RemoveAt(reverseIndex)
+                g_LogCounts[scriptName]--
+                wasRemoved := true
+                break
+            }
+        }
+    }
+    
+    ; Adiciona o novo log
+    g_aLogs.InsertAt(1, newMsg)
+    g_LogCounts[scriptName]++
+    
+    ; Verificação de segurança
+    if (g_LogCounts[scriptName] > g_MaxLogsPerScript) {
+        Loop, % g_aLogs.Length() {
+            reverseIndex := g_aLogs.Length() - A_Index + 1
+            if (reverseIndex > 0 && g_aLogs[reverseIndex].script = scriptName) {
+                g_aLogs.RemoveAt(reverseIndex)
+                g_LogCounts[scriptName]--
+                wasRemoved := true
+                if (g_LogCounts[scriptName] <= g_MaxLogsPerScript)
+                    break
+            }
+        }
+    }
+    
+    return wasRemoved
+}
+
 ; --------- GUI handlers ---------
-ToggleGlobalLimit:
-    GuiControlGet, UseGlobalLimit
-    g_UseGlobalLimit := UseGlobalLimit
-    ApplyFiltersOptimized(true)
-    UpdateStatsDisplay()
-return
-
-ConfigIndividualLimits:
-    global ActiveScripts, g_IndividualLimits
-    scripts := ""
-    for _, script in ActiveScripts {
-        val := g_IndividualLimits.HasKey(script) ? g_IndividualLimits[script] : 300
-        scripts .= script . "=" . val . "|"
-    }
-    InputBox, newLimits, Limite individual por script, Use o formato: script1=100|script2=50|..., , , , , , , %scripts%
-    if (ErrorLevel)
-        return
-    changes := StrSplit(newLimits, "|")
-    for _, part in changes {
-        arr := StrSplit(part, "=")
-        if (arr.Length() = 2 && arr[2] > 0)
-            g_IndividualLimits[arr[1]] := arr[2]
-    }
-    ApplyFiltersOptimized(true)
-    UpdateStatsDisplay()
-return
-
 ApplyMaxLogs:
     GuiControlGet, MaxLogsInput
     if (MaxLogsInput > 0 && MaxLogsInput <= 10000) {
         g_MaxLogsPerScript := MaxLogsInput
         TrimLogsToLimit()
-        ApplyFiltersOptimized(true)
+        ; Se não estiver pausado, atualiza a ListView
+        if (!g_ListViewPaused) {
+            ApplyFiltersOptimized(true)
+        }
         UpdateStatsDisplay()
-        MsgBox, 64, Sucesso, Limite de logs aplicado!
-    } else {
-        MsgBox, 16, Erro, Por favor, insira um valor entre 1 e 10000
     }
 return
 
 TrimLogsToLimit() {
-    global g_aLogs, g_LogCounts, g_UseGlobalLimit, g_MaxLogsPerScript, g_IndividualLimits
+    global g_aLogs, g_LogCounts, g_MaxLogsPerScript, g_FilteredLogs
 
+    ; Reset contadores
     for script in g_LogCounts
         g_LogCounts[script] := 0
+    
     newLogs := []
     for _, item in g_aLogs {
         scriptName := item.script
-        limit := GetLimitForScript(scriptName)
         if (!g_LogCounts.HasKey(scriptName))
             g_LogCounts[scriptName] := 0
-        if (g_LogCounts[scriptName] < limit) {
+        if (g_LogCounts[scriptName] < g_MaxLogsPerScript) {
             newLogs.Push(item)
             g_LogCounts[scriptName]++
         }
     }
     g_aLogs := newLogs
+    
+    ; Limpa g_FilteredLogs para forçar reconstrução
+    g_FilteredLogs := []
 }
 
 UpdateMaxLogs:
@@ -259,9 +554,19 @@ return
 ToggleVirtualMode:
     GuiControlGet, VirtualMode
     g_VirtualMode := VirtualMode
-    SB_SetText("Modo: " . (g_VirtualMode ? "Virtual" : "Padrão"), 4)
-    ApplyFiltersOptimized(true)
+    UpdateWarnErrorCount()
+    ; Se não estiver pausado, aplica a mudança
+    if (!g_ListViewPaused) {
+        ScheduleUpdate()
+    }
 return
+
+; Agenda atualização em vez de fazer imediatamente
+ScheduleUpdate() {
+    global g_PendingUpdate, g_LastFilterChange
+    g_PendingUpdate := true
+    g_LastFilterChange := A_TickCount
+}
 
 ClearLogs:
     Gui, ListView, LogView
@@ -282,7 +587,7 @@ ClearLogs:
             ScriptStats[script, "total"] := 0
         }
     UpdateStatsDisplay()
-    UpdateScriptSpecificStats("")
+    GuiControl,, StatsTextScript, Selecione um script específico para ver estatísticas detalhadas
 return
 
 ExportLogs:
@@ -307,16 +612,11 @@ ExportLogs:
     }
     FileDelete, %outputFile%
     FileAppend, %fileContent%, %outputFile%, UTF-8
-    if (ErrorLevel) {
-        MsgBox, 16, Erro, Não foi possível salvar o arquivo de logs.
-    } else {
-        MsgBox, 64, Sucesso, Logs exportados com sucesso para:`n%outputFile%
-    }
 return
 
 ; --------- Scripts, Filtros, ListView ---------
 AddScriptToRegistry(scriptName) {
-    global ActiveScripts, ScriptStats, SelectedScripts, g_LogCounts, g_IndividualLimits, g_UseGlobalLimit
+    global ActiveScripts, ScriptStats, SelectedScripts, g_LogCounts
     if (scriptName = "N/A" || scriptName = "")
         return
     isNew := true
@@ -329,8 +629,6 @@ AddScriptToRegistry(scriptName) {
             ScriptStats[scriptName] := {DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0, LOAD: 0, total: 0}
         if (!g_LogCounts.HasKey(scriptName))
             g_LogCounts[scriptName] := 0
-        if (!g_UseGlobalLimit && !g_IndividualLimits.HasKey(scriptName))
-            g_IndividualLimits[scriptName] := 300
         Gui, ListView, ScriptsListView
         LV_Add("", scriptName)
         SelectedScripts[scriptName] := 0
@@ -346,12 +644,29 @@ UpdateScriptStats(scriptName, logType) {
         ScriptStats[scriptName, logType] += 1
     ScriptStats[scriptName, "total"] += 1
     UpdateStatsDisplay()
-    UpdateScriptSpecificStats(scriptName)
+}
+
+UpdateScriptSpecificStatsIfSelected(scriptName) {
+    global SelectedScripts, g_LastSelectedScript
+    
+    selectedScript := ""
+    for script, isSelected in SelectedScripts {
+        if (script != "Todos" && isSelected = 1) {
+            selectedScript := script
+            break
+        }
+    }
+    
+    if (selectedScript != "" && selectedScript = scriptName) {
+        UpdateScriptSpecificStats(scriptName)
+    }
 }
 
 UpdateStatsDisplay() {
-    global ScriptStats, ActiveScripts, g_LogCounts, g_MaxLogsPerScript, g_UseGlobalLimit, g_IndividualLimits
-    totalDebug := 0, totalInfo := 0, totalWarn := 0, totalError := 0, totalLoad := 0, totalLogs := 0
+    global ScriptStats, ActiveScripts, g_LogCounts, g_MaxLogsPerScript
+    totalDebug := 0, totalInfo := 0, totalWarn := 0, totalError := 0, totalLoad := 0, totalProcessed := 0
+    totalStored := 0
+    
     for i, script in ActiveScripts
         if (ScriptStats.HasKey(script)) {
             totalDebug += ScriptStats[script, "DEBUG"]
@@ -359,26 +674,29 @@ UpdateStatsDisplay() {
             totalWarn += ScriptStats[script, "WARN"]
             totalError += ScriptStats[script, "ERROR"]
             totalLoad += ScriptStats[script, "LOAD"]
-            totalLogs += ScriptStats[script, "total"]
+            totalProcessed += ScriptStats[script, "total"]
         }
-    if (g_UseGlobalLimit)
-        limitInfo := " | Limite: " . g_MaxLogsPerScript . "/script (global)"
-    else
-        limitInfo := " | Limite: individual por script"
+    
+    for script, count in g_LogCounts
+        totalStored += count
+    
     statsText := "Scripts conectados: " . ActiveScripts.Length() 
-              . " | Total de logs: " . totalLogs
-              . limitInfo
-              . " | DEBUG=" . totalDebug 
-              . ", INFO=" . totalInfo 
-              . ", WARN=" . totalWarn 
-              . ", ERROR=" . totalError
-              . ", LOAD=" . totalLoad
+              . " | Logs armazenados: " . totalStored . " (processados: " . totalProcessed . ")"
+              . " | Limite: " . g_MaxLogsPerScript . "/script"
+              . "`nDEBUG=" . totalDebug 
+              . " | INFO=" . totalInfo 
+              . " | WARN=" . totalWarn 
+              . " | ERROR=" . totalError
+              . " | LOAD=" . totalLoad
     GuiControl,, StatsTextGlobal, %statsText%
 }
 
 UpdateScriptSpecificStats(scriptName) {
-    global ScriptStats, SelectedScripts, g_LogCounts, g_UseGlobalLimit, g_MaxLogsPerScript, g_IndividualLimits
-    scriptStatsText := "Exibindo logs dos scripts selecionados"
+    global ScriptStats, SelectedScripts, g_LogCounts, g_MaxLogsPerScript, g_LastSelectedScript
+    
+    g_LastSelectedScript := scriptName
+    scriptStatsText := "Selecione um script específico para ver estatísticas detalhadas"
+    
     if (scriptName && scriptName != "Todos" && ScriptStats.HasKey(scriptName)) {
         debug := ScriptStats[scriptName, "DEBUG"]
         info := ScriptStats[scriptName, "INFO"]
@@ -387,15 +705,14 @@ UpdateScriptSpecificStats(scriptName) {
         load := ScriptStats[scriptName, "LOAD"]
         total := ScriptStats[scriptName, "total"]
         currentCount := g_LogCounts.HasKey(scriptName) ? g_LogCounts[scriptName] : 0
-        limit := GetLimitForScript(scriptName)
         if (total > 0) {
             debugPct := Round((debug / total) * 100)
             infoPct := Round((info / total) * 100)
             warnPct := Round((warn / total) * 100)
             errorPct := Round((error / total) * 100)
             loadPct := Round((load / total) * 100)
-            scriptStatsText := "Script: " . scriptName 
-                            . " | Logs armazenados: " . currentCount . "/" . limit
+            scriptStatsText := "Script Selecionado: " . scriptName 
+                            . " | Logs armazenados: " . currentCount . "/" . g_MaxLogsPerScript
                             . " | Total processados: " . total
                             . "`nDEBUG: " . debug . " (" . debugPct . "%)"
                             . " | INFO: " . info . " (" . infoPct . "%)"
@@ -426,13 +743,17 @@ ScriptsListViewChanged:
                     LV_Modify(A_Index, "Check")
                 }
             }
+            GuiControl,, StatsTextScript, Exibindo logs de todos os scripts selecionados
         } else {
             allChecked := true
+            selectedScript := ""
             Loop, % LV_GetCount() {
                 if (A_Index > 1) {
                     LV_GetText(rowScript, A_Index)
                     if (SelectedScripts[rowScript] = 0) {
                         allChecked := false
+                    } else {
+                        selectedScript := rowScript
                     }
                 }
             }
@@ -446,28 +767,41 @@ ScriptsListViewChanged:
                     }
                 }
             }
+            if (selectedScript != "") {
+                UpdateScriptSpecificStats(selectedScript)
+            } else {
+                GuiControl,, StatsTextScript, Selecione um script específico para ver estatísticas detalhadas
+            }
         }
-        UpdateScriptSpecificStats(script)
-        ApplyFiltersOptimized(true)
+        ; Se não estiver pausado, aplica os filtros
+        if (!g_ListViewPaused) {
+            ScheduleUpdate()
+        }
     }
 return
 
 SearchChanged:
     GuiControlGet, SearchText
-    SetTimer, ApplyFiltersTimer, -300
+    ; Se não estiver pausado, agenda update
+    if (!g_ListViewPaused) {
+        SetTimer, ApplyFiltersTimer, -500
+    }
 return
 
 ApplyFiltersTimer:
-    ApplyFiltersOptimized(true)
+    ScheduleUpdate()
 return
 
 ; --------- ListView / Virtualização ---------
 ApplyFilters:
-    ApplyFiltersOptimized(false)
+    ; Se não estiver pausado, agenda update
+    if (!g_ListViewPaused) {
+        ScheduleUpdate()
+    }
 return
 
 ApplyFiltersOptimized(forceUpdate := false) {
-    global g_aLogs, SearchText, SelectedScripts, g_FilteredLogs, g_VirtualMode, g_LastScrollPos
+    global g_aLogs, SearchText, SelectedScripts, g_FilteredLogs, g_VirtualMode, g_LastScrollPos, g_UpdateThreshold, g_ListViewPaused
     static lastSearchText := ""
     static lastChkDEBUG := ""
     static lastChkINFO := ""
@@ -477,6 +811,12 @@ ApplyFiltersOptimized(forceUpdate := false) {
     static lastLogsLength := 0
     static lastSelectedHash := ""
     static lastLogsSignature := ""
+    
+    ; Se pausado, não atualiza
+    if (g_ListViewPaused && !forceUpdate) {
+        return
+    }
+    
     Gui, Submit, NoHide
     GuiControlGet, SearchText
     GuiControlGet, ChkDEBUG
@@ -484,12 +824,15 @@ ApplyFiltersOptimized(forceUpdate := false) {
     GuiControlGet, ChkWARN
     GuiControlGet, ChkERROR
     GuiControlGet, ChkLOAD
+    
     selectedHash := ""
     for script, isSelected in SelectedScripts
         selectedHash .= script . ":" . isSelected . "|"
+    
     logsSignature := ""
     if (g_aLogs.Length() > 0)
         logsSignature := g_aLogs[1].timestamp . "|" . g_aLogs[1].script . "|" . g_aLogs.Length()
+    
     needsUpdate := forceUpdate
     if (!needsUpdate) {
         if (SearchText != lastSearchText
@@ -503,11 +846,13 @@ ApplyFiltersOptimized(forceUpdate := false) {
         || logsSignature != lastLogsSignature)
             needsUpdate := true
     }
+    
     if (needsUpdate) {
         Gui, ListView, LogView
         currentFocus := LV_GetNext(0, "Focused")
         if (currentFocus > 0)
             g_LastScrollPos := currentFocus
+        
         lastSearchText := SearchText
         lastChkDEBUG := ChkDEBUG
         lastChkINFO := ChkINFO
@@ -517,37 +862,51 @@ ApplyFiltersOptimized(forceUpdate := false) {
         lastLogsLength := g_aLogs.Length()
         lastSelectedHash := selectedHash
         lastLogsSignature := logsSignature
+        
         if (g_VirtualMode)
             UpdateVirtualListView()
         else
             UpdateStandardListView()
+        
         SB_SetText("Logs exibidos: " . LV_GetCount() . " / " . g_aLogs.Length(), 1)
     }
 }
 
 UpdateVirtualListView() {
-    global g_aLogs, g_FilteredLogs, SearchText, SelectedScripts, g_LastScrollPos
+    global g_aLogs, g_FilteredLogs, SearchText, SelectedScripts, g_LastScrollPos, g_UpdateThreshold
+    
     g_FilteredLogs := []
     for index, item in g_aLogs
         if (ShouldShowItem(item))
             g_FilteredLogs.Push(item)
+    
     Gui, ListView, LogView
     currentCount := LV_GetCount()
     newCount := g_FilteredLogs.Length()
-    if (Abs(newCount - currentCount) > 5 || currentCount = 0)
+    
+    if (Abs(newCount - currentCount) > g_UpdateThreshold || currentCount = 0) {
         RebuildListView()
-    else {
-        firstItemValid := false
+    } else {
+        firstThreeValid := true
         if (currentCount > 0 && newCount > 0) {
-            LV_GetText(lvTimestamp, 1, 1)
-            LV_GetText(lvScript, 1, 5)
-            firstItemValid := (g_FilteredLogs[1].timestamp = lvTimestamp && g_FilteredLogs[1].script = lvScript)
+            Loop, 3 {
+                if (A_Index <= currentCount && A_Index <= newCount) {
+                    LV_GetText(lvTimestamp, A_Index, 1)
+                    LV_GetText(lvScript, A_Index, 5)
+                    if (g_FilteredLogs[A_Index].timestamp != lvTimestamp || g_FilteredLogs[A_Index].script != lvScript) {
+                        firstThreeValid := false
+                        break
+                    }
+                }
+            }
         }
-        if (firstItemValid)
+        
+        if (firstThreeValid)
             UpdateListViewIncremental()
         else
             RebuildListView()
     }
+    
     if (g_LastScrollPos > 0 && g_LastScrollPos <= LV_GetCount())
         LV_Modify(g_LastScrollPos, "Focus")
 }
@@ -566,6 +925,7 @@ UpdateListViewIncremental() {
     Gui, ListView, LogView
     currentCount := LV_GetCount()
     targetCount := g_FilteredLogs.Length()
+    
     if (targetCount > currentCount) {
         itemsToAdd := targetCount - currentCount
         Loop, %itemsToAdd% {
@@ -602,11 +962,11 @@ ShouldShowItem(item) {
 
 ResizeListViewColumns() {
     Gui, ListView, LogView
-    col1Width := 140  ; Timestamp
-    col2Width := 60   ; Socket  
-    col3Width := 100  ; IP
-    col4Width := 60   ; Tipo
-    col5Width := 120  ; Script
+    col1Width := 140
+    col2Width := 60
+    col3Width := 100
+    col4Width := 60
+    col5Width := 120
     GuiControlGet, pos, Pos, LogView
     listViewWidth := posW
     scrollBarWidth := 20
@@ -625,10 +985,13 @@ ResizeListViewColumns() {
 GuiSize:
     if (A_EventInfo = 1)
         return
-    scriptsListViewWidth := 200
+    
+    scriptsListViewWidth := 250
+    statusBarHeight := 25
     newLogViewWidth := A_GuiWidth - scriptsListViewWidth - 30
     newLogViewX := scriptsListViewWidth + 20
-    newHeight := A_GuiHeight - 210
+    newHeight := A_GuiHeight - 245 - statusBarHeight
+    
     GuiControl, Move, ScriptsListView, % "w" . scriptsListViewWidth . " h" . newHeight
     GuiControl, Move, LogView, % "x" . newLogViewX . " w" . newLogViewWidth . " h" . newHeight
     Gui, ListView, LogView
