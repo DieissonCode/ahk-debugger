@@ -1,11 +1,6 @@
-﻿
-if z_logger
-	return
-
-Global z_logger := true
-
+﻿; Logger.ahk - Simple and robust logger with reverse connection support, buffer, flush, reconnection and command response
 #Include C:\Autohotkey 2024\Root\Libs\socket.ahk
-#Include C:\AutoHotkey\class\functions.ahk	
+#Include C:\AutoHotkey\class\functions.ahk
 
 class Logger {
     static DEFAULT_HOST := "192.9.100.100"
@@ -15,9 +10,9 @@ class Logger {
     static reverseSocket := -1
     static scriptName := ""
     static isConnected := false
-    static reconnectInterval := 5000      ; ms entre tentativas
+    static reconnectInterval := 5000
     static lastConnectAttempt := 0
-    static maxReconnectAttempts := 15
+    static maxReconnectAttempts := 9999999999999
     static reconnectAttempts := 0
     static localBuffer := []
     static maxBufferSize := 100
@@ -94,7 +89,7 @@ class Logger {
     }
 
     sendLog(message, level) {
-        dataStr := "type=" . level . "||scriptName=" . this.scriptName . "||message=" . message
+        dataStr := "type=" . level . "||scriptName=" . this.scriptName . "||message=" . message . "&&"
         DebugLogSmart("[LOGGER] Sending: " . dataStr)
         VarSetCapacity(utf8, StrPut(dataStr, "UTF-8"))
         StrPut(dataStr, &utf8, "UTF-8")
@@ -151,23 +146,29 @@ class Logger {
     debug(message) {
         return this.log(message, "DEBUG")
     }
+
     error(message) {
         return this.log(message, "ERROR")
     }
+
     load(message) {
         return this.log(message, "LOAD")
     }
+
     info(message) {
         return this.log(message, "INFO")
     }
+
     warn(message) {
         return this.log(message, "WARN")
     }
 
     processReverseMessage(message) {
         DebugLogSmart("[LOGGER-REVERSE] Processing message: " . message)
-        if (InStr(message, "RESTART_SCRIPT")) {
-            this.info("Script restart requested by server")
+        resposta := "Comando " . message . " recebido"
+        this.sendReverseResponse(resposta)
+        if (InStr(message, "RELOAD")) {
+            this.info("Script reload requested by server")
             Sleep, 500
             Reload
             return
@@ -177,6 +178,16 @@ class Logger {
             return
         }
         MsgBox, % "[LOGGER-REVERSE] Command received from server:`n" . message
+    }
+
+    sendReverseResponse(resposta) {
+        if (Logger.reverseSocket != -1) {
+            VarSetCapacity(utf8, StrPut(resposta, "UTF-8"))
+            StrPut(resposta, &utf8, "UTF-8")
+            bytesToSend := StrPut(resposta, "UTF-8") - 1
+            err := AHKsock_ForceSend(Logger.reverseSocket, &utf8, bytesToSend)
+            DebugLogSmart("[LOGGER-REVERSE] Resposta enviada ao server: " . resposta . " | Erro: " . err)
+        }
     }
 }
 
@@ -220,8 +231,7 @@ LoggerReverseHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData := "", bD
     }
 }
 
-LoggerReconnectTimer() {
+LoggerReconnectTimer()	{
     if (!Logger.isConnected && !Logger.offlineMode && Logger.autoReconnect)
         Logger.connect()
-	OutputDebug, % "Tentando reconectar..."
 }

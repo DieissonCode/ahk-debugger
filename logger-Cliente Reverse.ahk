@@ -11,15 +11,15 @@ global MaxLoops := 999999 ; Deixe rodando para testar 24/7
 
 ; Timer para reconexão automática
 SetTimer, TryLoggerConnect, 2000
+; Loop principal de envio de logs
+SetTimer, LoggerTestLoop, 700
+Return
 
 TryLoggerConnect:
     if (!logger.isConnected) {
         logger.connect()
     }
 return
-
-; Loop principal de envio de logs
-SetTimer, LoggerTestLoop, 700
 
 LoggerTestLoop:
     LoopCount++
@@ -30,15 +30,15 @@ LoggerTestLoop:
     logger.load("Loop " . LoopCount . ": LOAD - Dados carregados do ciclo " . LoopCount)
 
     ; Testar desconexão/reconexão manual
-    if (mod(LoopCount, 50) = 0) {
-        logger.info("Loop " . LoopCount . ": INFO - Simulando desconexão manual para teste de reconexão")
-        logger.disconnect()
-    }
+    ;if (mod(LoopCount, 50) = 0) {
+     ;   logger.info("Loop " . LoopCount . ": INFO - Simulando desconexão manual para teste de reconexão")
+        ;logger.disconnect()
+    ;}
 
     ; Testar buffer local
     if (mod(LoopCount, 75) = 0) {
         logger.info("Loop " . LoopCount . ": INFO - Simulando envio de logs sem conexão (buffer local)")
-        logger.disconnect()
+        ;logger.disconnect()
         Sleep, 500
         logger.info("Loop " . LoopCount . ": INFO - Este log vai para o buffer local")
         logger.debug("Loop " . LoopCount . ": DEBUG - Buffer local em ação")
