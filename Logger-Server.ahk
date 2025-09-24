@@ -12,7 +12,7 @@
 ; Data: 2025-09-09
 ; Autor: Dieisson Code
 ; Repositório: https://github.com/DieissonCode/ahk-debugger
-; (Refatorado para OOP + limite por script + tipo de log)
+; (Refatorado: OOP + limite por script/tipo + menu de contexto para abrir IP no Edge)
 
 #SingleInstance Force
 #Include C:\Autohotkey 2024\Root\Libs\socket.ahk
@@ -96,6 +96,13 @@ Server_GuiClose() {
     global g_Server
     g_Server.GuiClose()
 }
+Server_LogViewEvent:
+	Server_LogViewEvent()
+Return
+Server_LogViewEvent() {
+    global g_Server
+    g_Server.LogViewEvent()
+}
 
 SocketEventHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLength) {
     global g_Server
@@ -108,16 +115,16 @@ class LoggerServer {
         this.port := port
         this.timestampFormat := "yyyy-MM-dd HH:mm:ss"
         this.defaultFilter := {DEBUG: 1, INFO: 1, WARN: 1, ERROR: 1, LOAD: 1}
-        this.logs := []                  ; Todos os logs (ordenados: índice 1 = mais novo)
+        this.logs := []                  ; Todos os logs (mais novo índice 1)
         this.filteredLogs := []
         this.searchText := ""
         this.activeScripts := []
         this.selectedScripts := {}
-        this.maxLogsPerScript := 10      ; Agora: limite por script por TIPO
-        this.logCounts := {}             ; Estrutura: logCounts[script][tipo] := count
+        this.maxLogsPerScript := 10      ; Limite por script POR TIPO
+        this.logCounts := {}             ; logCounts[script][tipo] := count
         this.connectedClients := 0
         this.logsReceived := 0
-        this.scriptStats := {}           ; Estatísticas processadas (total histórico)
+        this.scriptStats := {}
         this.virtualMode := true
         this.lastScrollPos := 1
         this.lastSelectedScript := ""
@@ -128,6 +135,7 @@ class LoggerServer {
         this.warnErrorBuffer := []
         this.maxWarnErrorBuffer := 50
         this.warnErrorWindowOpen := false
+        this.lastContextIP := ""
         DebugLogSmart("[SERVER] Instância LoggerServer criada (porta: " . this.port . ")")
     }
 
@@ -139,8 +147,10 @@ class LoggerServer {
     }
 
     InitGUI() {
-		Global
-        Gui, +Resize +MinSize580x420 +AlwaysOnTop
+        ; Solicitação do usuário: tornar variáveis implícitas globais dentro desta função
+        global
+
+        Gui, +Resize +MinSize580x420 ;+AlwaysOnTop
         Gui, Color, FFFFFF
         Gui, Font, s10, Segoe UI
 
@@ -179,7 +189,8 @@ class LoggerServer {
         Gui, Add, Text, x570 y130 w620 h2 0x10
         Gui, Add, Text, x570 y140 w620 h85 vStatsTextScript, Selecione um script específico para ver estatísticas detalhadas
 
-        Gui, Add, ListView, x270 y245 w880 r18 vLogView -Multi +Grid +LV0x10000, Timestamp|Socket|IP|Tipo|Script|Mensagem
+        ; Adicionando AltSubmit e gServer_LogViewEvent para capturar clique direito
+        Gui, Add, ListView, x270 y245 w880 r18 vLogView -Multi +Grid +LV0x10000 gServer_LogViewEvent AltSubmit, Timestamp|Socket|IP|Tipo|Script|Mensagem
         this.ResizeListViewColumns()
 
         Gui, Add, StatusBar
@@ -189,7 +200,7 @@ class LoggerServer {
         SB_SetText("Scripts únicos: 0", 3)
         SB_SetText("Status: Ativo | WARN/ERROR: 0", 4)
 
-        SysGet, MonitorWorkArea, MonitorWorkArea
+		SysGet, MonitorWorkArea, MonitorWorkArea
         serverX := 10
         serverY := MonitorWorkAreaBottom - 700
         Gui, Show, x%serverX% y%serverY% w1220 h700, Logger Server v1.3.1
@@ -201,7 +212,7 @@ class LoggerServer {
         err := AHKsock_Listen(this.port, "SocketEventHandler")
         DebugLogSmart("[SERVER] AHKsock_Listen chamado. Porta: " . this.port . " | Resultado: " . (err ? err : "Ativado"))
         if (err) {
-            MsgBox, 16, Erro,% "Falha ao iniciar o servidor na porta " this.port . "`nErro AHKsock: " . err . "`nErrorLevel: " . ErrorLevel
+            MsgBox, 16, Erro,% "Falha ao iniciar o servidor na porta " . this.port . ".`nErro AHKsock: " . err . "`nErrorLevel: " . ErrorLevel
             ExitApp
         }
     }
@@ -236,15 +247,14 @@ class LoggerServer {
             this.UpdateScriptStats(scriptName, tipo)
             FormatTime, timestamp,, % this.timestampFormat
             this.logsReceived++
-            SB_SetText("Logs exibidos: " . LV_GetCount() . " / " . this.logs.Length(), 1)
 
             newMsg := {timestamp: timestamp, socket: iSocket, ip: sAddr, tipo: tipo, script: scriptName, mensagem: mensagem}
             this.AddToWarnErrorBuffer(newMsg)
             wasRemoved := this.AddLogWithLimit(newMsg)
 
-            if (!this.listViewPaused) {
+            if (!this.listViewPaused)
                 this.ApplyFiltersSmartUpdate(newMsg, wasRemoved)
-            }
+
             this.UpdateScriptSpecificStatsIfSelected(scriptName)
             this.UpdateStatsDisplay()
         }
@@ -264,11 +274,42 @@ class LoggerServer {
             FormatTime, timestamp,, % this.timestampFormat
             disconnectMsg := {timestamp: timestamp, socket: iSocket, ip: sAddr, tipo: "INFO", script: scriptName, mensagem: "Script desconectado"}
             wasRemoved := this.AddLogWithLimit(disconnectMsg)
-            if (!this.listViewPaused) {
+            if (!this.listViewPaused)
                 this.ApplyFiltersSmartUpdate(disconnectMsg, wasRemoved)
-            }
             this.UpdateStatsDisplay()
         }
+    }
+
+    ; ---------------------- LOGVIEW EVENT / CONTEXT MENU ----------------------
+    LogViewEvent() {
+        if (A_GuiEvent = "RightClick") {
+            row := A_EventInfo
+            if (row > 0) {
+                Gui, ListView, LogView
+                LV_GetText(fullMsg, row, 6) ; Coluna 6 = Mensagem completa
+                ip := ""
+                ; Regex para capturar primeiro IPv4 válido (0-255) com porta opcional
+                ipPattern := "((?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d))(?:\:\d+)?"
+                if (RegExMatch(fullMsg, ipPattern, m)) {
+                    ip := m1
+                }
+                this.lastContextIP := ip
+                if (ip != "")	{
+                    global g_Server
+    				g_Server.OpenIPInEdge()
+				}
+            }
+        }
+    }
+
+    OpenIPInEdge() {
+        ip := this.lastContextIP
+        if (!ip || ip = "")
+            return
+        url := ip
+        if !(SubStr(url, 1, 7) = "http://" || SubStr(url, 1, 8) = "https://")
+            url := "http://" . url
+        Run, % "microsoft-edge:" . url
     }
 
     ; ---------------------- WARN/ERROR BUFFER ----------------------
@@ -301,7 +342,7 @@ class LoggerServer {
         }
         this.warnErrorWindowOpen := true
 
-        Gui, WarnError:+Resize +MinSize600x400 +AlwaysOnTop
+        Gui, WarnError:+Resize +MinSize600x400 ;+AlwaysOnTop
         Gui, WarnError:Color, FFFFFF
         Gui, WarnError:Font, s10, Segoe UI
 
@@ -445,7 +486,7 @@ class LoggerServer {
         }
     }
 
-    ; ---------------------- NOVA LÓGICA DE LIMITE (por script + tipo) ----------------------
+    ; ---------------------- LIMITE POR SCRIPT + TIPO ----------------------
     AddLogWithLimit(newMsg) {
         scriptName := newMsg.script
         tipo := newMsg.tipo
@@ -456,7 +497,6 @@ class LoggerServer {
 
         wasRemoved := false
         if (this.logCounts[scriptName][tipo] >= this.maxLogsPerScript) {
-            ; Remove o mais antigo daquele script + tipo
             Loop, % this.logs.Length() {
                 reverseIndex := this.logs.Length() - A_Index + 1
                 if (reverseIndex > 0) {
@@ -472,7 +512,6 @@ class LoggerServer {
         }
         this.logs.InsertAt(1, newMsg)
         this.logCounts[scriptName][tipo]++
-        ; Segurança: se passou do limite, remove extras
         while (this.logCounts[scriptName][tipo] > this.maxLogsPerScript) {
             Loop, % this.logs.Length() {
                 reverseIndex := this.logs.Length() - A_Index + 1
@@ -505,7 +544,6 @@ class LoggerServer {
     TrimLogsToLimit() {
         newLogs := []
         newCounts := {}
-        ; Percorre em ordem do mais novo ao mais antigo já respeitando prioridade dos mais novos
         for _, item in this.logs {
             s := item.script
             t := item.tipo
@@ -551,19 +589,10 @@ class LoggerServer {
         this.logs := []
         this.filteredLogs := []
         this.logsReceived := 0
-        SB_SetText("Logs exibidos: 0", 1)
         this.logCounts := {}
-        for i, scriptName in this.activeScripts
-            if (this.scriptStats.HasKey(scriptName)) {
-                this.scriptStats[scriptName, "DEBUG"] := 0
-                this.scriptStats[scriptName, "INFO"] := 0
-                this.scriptStats[scriptName, "WARN"] := 0
-                this.scriptStats[scriptName, "ERROR"] := 0
-                this.scriptStats[scriptName, "LOAD"] := 0
-                this.scriptStats[scriptName, "total"] := 0
-            }
         this.UpdateStatsDisplay()
         GuiControl,, StatsTextScript, Selecione um script específico para ver estatísticas detalhadas
+        SB_SetText("Logs exibidos: 0", 1)
     }
 
     ExportLogs() {
@@ -599,7 +628,7 @@ class LoggerServer {
             if (!this.scriptStats.HasKey(scriptName))
                 this.scriptStats[scriptName] := {DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0, LOAD: 0, total: 0}
             if (!this.logCounts.HasKey(scriptName))
-                this.logCounts[scriptName] := {}  ; Inicia mapa de tipos
+                this.logCounts[scriptName] := {}
             Gui, ListView, ScriptsListView
             LV_Add("", scriptName)
             this.selectedScripts[scriptName] := 0
@@ -637,7 +666,6 @@ class LoggerServer {
                 totalLoad += this.scriptStats[scriptName, "LOAD"]
                 totalProcessed += this.scriptStats[scriptName, "total"]
             }
-        ; Soma armazenados atuais (limites aplicados) por tipo
         for s, map in this.logCounts
             for t, cnt in map
                 totalStored += cnt
@@ -662,11 +690,13 @@ class LoggerServer {
             error := this.scriptStats[scriptName, "ERROR"]
             load := this.scriptStats[scriptName, "LOAD"]
             total := this.scriptStats[scriptName, "total"]
-            storedDebug := this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("DEBUG") ? this.logCounts[scriptName]["DEBUG"] : 0
-            storedInfo  := this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("INFO")  ? this.logCounts[scriptName]["INFO"]  : 0
-            storedWarn  := this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("WARN")  ? this.logCounts[scriptName]["WARN"]  : 0
-            storedError := this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("ERROR") ? this.logCounts[scriptName]["ERROR"] : 0
-            storedLoad  := this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("LOAD")  ? this.logCounts[scriptName]["LOAD"]  : 0
+
+            storedDebug := (this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("DEBUG")) ? this.logCounts[scriptName]["DEBUG"] : 0
+            storedInfo  := (this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("INFO"))  ? this.logCounts[scriptName]["INFO"]  : 0
+            storedWarn  := (this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("WARN"))  ? this.logCounts[scriptName]["WARN"]  : 0
+            storedError := (this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("ERROR")) ? this.logCounts[scriptName]["ERROR"] : 0
+            storedLoad  := (this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("LOAD"))  ? this.logCounts[scriptName]["LOAD"]  : 0
+
             scriptStatsText := "Script: " . scriptName
                              . " | Limite por tipo: " . this.maxLogsPerScript
                              . " | Total processados: " . total
