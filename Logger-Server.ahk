@@ -1083,7 +1083,7 @@ RebuildListView() {
 
 ShouldShowItem(item) {
     global SearchText, SelectedScripts
-    typeVar := "Chk" . item.tipo
+    typeVar := "Chk" . (item.tipo = "N/A" ? "Indisponivel" : item.tipo)
     showByType := %typeVar%
     showByText := (SearchText = "") 
                 || InStr(item.mensagem, SearchText, false) 
