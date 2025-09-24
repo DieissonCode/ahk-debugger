@@ -12,1133 +12,944 @@
 ; Data: 2025-09-09
 ; Autor: Dieisson Code
 ; Repositório: https://github.com/DieissonCode/ahk-debugger
+; (Refatorado para OOP + limite por script + tipo de log)
 
 #SingleInstance Force
 #Include C:\Autohotkey 2024\Root\Libs\socket.ahk
 #Include C:\AutoHotkey\class\functions.ahk
 
-; Configurações globais
-global PORTA := 4041
-global REVERSE_PORT := 5041
-global DEFAULT_FILTER := {DEBUG: 1, INFO: 1, WARN: 1, ERROR: 1, LOAD: 1}
-global TimestampFormat := "yyyy-MM-dd HH:mm:ss"
-global g_aLogs := []
-global SearchText := ""
-global ActiveScripts := []
-global SelectedScripts := {}
-global g_FilteredLogs := []
-global g_MaxLogsPerScript := 10
-global g_LogCounts := {}
-global iConnectedClients := 0
-global iLogsReceived := 0
-global ScriptStats := {}
-global g_VirtualMode := true
-global g_LastScrollPos := 1
-global g_LastSelectedScript := ""
-global g_UpdateThreshold := 15
-global g_PendingUpdate := false
-global g_LastFilterChange := 0
-global g_ListViewPaused := false
-global g_WarnErrorBuffer := []
-global g_MaxWarnErrorBuffer := 50
-global g_ClientConnections := {}  ; Armazena {socket: iSocket, ip: sAddr, script: scriptName}
-global g_UseGlobalLimit := true   ; Por padrão, aplica o limite global a todos os scripts
-
-DebugLogSmart("[SERVER] Script inicializado.")
-
-; GUI - Interface otimizada com espaçamento correto para StatusBar
-Gui, +Resize +MinSize580x420 +AlwaysOnTop
-Gui, Color, FFFFFF
-Gui, Font, s10, Segoe UI
-
-Gui, Add, Text, x10 y10 w350 h25, Servidor de Log (Porta: %PORTA%)
-Gui, Add, Button, x+15 w90 h35 gClearLogs, Limpar
-Gui, Add, Button, x+10 w120 h35 gExportLogs, Exportar Logs
-Gui, Add, Button, x+10 w140 h35 gShowWarnErrorBuffer, Analisar WARN/ERROR
-
-Gui, Add, GroupBox, x10 y55 w520 h180, Filtros e Configurações
-
-; Filtros de tipo
-Gui, Add, Checkbox, x20 y80 w85 h25 vChkDEBUG gApplyFilters Checked, DEBUG
-Gui, Add, Checkbox, x+10 w85 h25 vChkINFO gApplyFilters Checked, INFO
-Gui, Add, Checkbox, x+10 w85 h25 vChkWARN gApplyFilters Checked, WARN
-Gui, Add, Checkbox, x+10 w85 h25 vChkERROR gApplyFilters Checked, ERROR
-Gui, Add, Checkbox, x+10 w80 h25 vChkLOAD gApplyFilters Checked, LOAD
-
-; Campo de busca
-Gui, Add, Text, x20 y110 w70 h25, Buscar:
-Gui, Add, Edit, x95 y107 w370 h25 vSearchText gSearchChanged, 
-
-; Limite logs/script global
-Gui, Add, Text, x20 y140 w120 h25, Limite logs/script:
-Gui, Add, Edit, x145 y137 w80 h25 vMaxLogsInput gUpdateMaxLogs Number, %g_MaxLogsPerScript%
-Gui, Add, Button, x230 y136 w70 h27 gApplyMaxLogs, Aplicar
-Gui, Add, Checkbox, x310 y140 w180 h25 vUseGlobalLimit gToggleGlobalLimit Checked, Aplicar a todos os scripts
-
-; Modo virtualizado e PAUSA
-Gui, Add, Checkbox, x20 y170 w160 h25 vVirtualMode gToggleVirtualMode Checked, Modo Virtualizado
-Gui, Add, Checkbox, x200 y170 w180 h25 vPauseListView gTogglePauseListView, Pausar atualização
-
-; Indicador visual de pausa
-Gui, Add, Text, x390 y170 w120 h25 vPauseIndicator Center +Border, PAUSADO
-GuiControl, Hide, PauseIndicator
-
-; Scripts ListView
-Gui, Add, ListView, x10 y245 w250 r16 vScriptsListView +Checked +LV0x10000 gScriptsListViewChanged AltSubmit, Scripts
-LV_Add("", "Todos")
-SelectedScripts["Todos"] := 0
-
-; Estatísticas - Layout corrigido
-Gui, Add, GroupBox, x550 y55 w650 h100, Estatísticas
-Gui, Add, Text, x570 y80 w620 h45 vStatsTextGlobal, Scripts conectados: 0 | Logs armazenados: 0 (processados: 0)
-
-; Grupo para comandos reversos
-Gui, Add, GroupBox, x550 y165 w650 h70, Comandos Reversos
-Gui, Add, Text, x570 y185 w70 h25, Comando:
-Gui, Add, Edit, x645 y185 w375 h25 vCommandText,
-Gui, Add, Button, x1030 y184 w150 h28 gSendCommand, Enviar Comando
-
-; ListView com espaço adequado para StatusBar
-Gui, Add, ListView, x270 y245 w880 r16 vLogView -Multi +Grid +LV0x10000, Timestamp|Socket|IP|Tipo|Script|Mensagem
-ResizeListViewColumns()
-
-; Estatísticas de script específico
-Gui, Add, GroupBox, x10 y585 w1190 h85, Estatísticas do Script Selecionado
-Gui, Add, Text, x20 y525 w1120 h55 vStatsTextScript, Selecione um script específico para ver estatísticas detalhadas
-
-Gui, Add, StatusBar
-SB_SetParts(200, 150, 200, 180)
-SB_SetText("Logs recebidos: 0", 1)
-SB_SetText("Clientes conectados: 0", 2)
-SB_SetText("Scripts únicos: 0", 3)
-SB_SetText("Status: Ativo | WARN/ERROR: 0", 4)
-
-SysGet, MonitorWorkArea, MonitorWorkArea
-serverX := 10
-serverY := MonitorWorkAreaBottom - 750
-
-Gui, Show, x%serverX% y%serverY% w1220 h700, Logger Server v1.3.1
-
-; Timer para processar updates pendentes
-SetTimer, ProcessPendingUpdates, 500
-
-err := AHKsock_Listen(PORTA, "SocketEventHandler")
-DebugLogSmart("[SERVER] AHKsock_Listen chamado. Porta: " PORTA " | Resultado: " (err ? err : "Ativado"))
-if (err) {
-    DebugLogSmart("[SERVER] Falha ao iniciar servidor. ErrorLevel: " ErrorLevel)
-    MsgBox, 16, Erro, Falha ao iniciar o servidor na porta %PORTA%.`nErro AHKsock: %err%`nErrorLevel: %ErrorLevel%
-    ExitApp
-}
+global g_Server
+g_Server := new LoggerServer(4041)
+g_Server.Start()
 Return
 
-; Timer para processar updates pendentes (reduz rebuilds desnecessários)
-ProcessPendingUpdates:
-    global g_PendingUpdate, g_LastFilterChange
-    if (g_PendingUpdate && A_TickCount - g_LastFilterChange > 800) {
-        g_PendingUpdate := false
-        ApplyFiltersOptimized(true)
-    }
-return
+; ---------------------- WRAPPERS (Timers / GUI / Eventos) ----------------------
+Server_ProcessPendingUpdates() {
+    global g_Server
+    g_Server.ProcessPendingUpdates()
+}
+Server_ShowWarnErrorBuffer() {
+    global g_Server
+    g_Server.ShowWarnErrorBuffer()
+}
+Server_FilterWarnError() {
+    global g_Server
+    g_Server.FilterWarnErrorList()
+}
+Server_ExportWarnError() {
+    global g_Server
+    g_Server.ExportWarnError()
+}
+Server_ClearWarnError() {
+    global g_Server
+    g_Server.ClearWarnErrorBuffer()
+}
+Server_CloseWarnError() {
+    global g_Server
+    g_Server.CloseWarnErrorWindow()
+}
+Server_TogglePauseListView() {
+    global g_Server
+    g_Server.TogglePauseListView()
+}
+Server_ApplyMaxLogs() {
+    global g_Server
+    g_Server.ApplyMaxLogs()
+}
+Server_UpdateMaxLogs() {
+    global g_Server
+    g_Server.UpdateMaxLogs()
+}
+Server_ToggleVirtualMode() {
+    global g_Server
+    g_Server.ToggleVirtualMode()
+}
+Server_ClearLogs() {
+    global g_Server
+    g_Server.ClearLogs()
+}
+Server_ExportLogs() {
+    global g_Server
+    g_Server.ExportLogs()
+}
+Server_ScriptsListViewChanged() {
+    global g_Server
+    g_Server.ScriptsListViewChanged()
+}
+Server_SearchChanged() {
+    global g_Server
+    g_Server.SearchChanged()
+}
+Server_ApplyFiltersTimer() {
+    global g_Server
+    g_Server.ApplyFiltersTimer()
+}
+Server_ApplyFilters() {
+    global g_Server
+    g_Server.ApplyFilters()
+}
+Server_GuiSize() {
+    global g_Server
+    g_Server.GuiSize()
+}
+Server_GuiClose() {
+    global g_Server
+    g_Server.GuiClose()
+}
 
 SocketEventHandler(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLength) {
-    global iConnectedClients, iLogsReceived, g_aLogs, ActiveScripts, ScriptStats
-    global g_ClientConnections
+    global g_Server
+    g_Server.HandleSocketEvent(sEvent, iSocket, sName, sAddr, sPort, bData, bDataLength)
+}
 
-    if (sEvent = "ACCEPTED") {
-        iConnectedClients++
-        SB_SetText("Clientes conectados: " iConnectedClients, 2)
+; ----------------------------- CLASSE PRINCIPAL --------------------------------
+class LoggerServer {
+    __New(port := 4041) {
+        this.port := port
+        this.timestampFormat := "yyyy-MM-dd HH:mm:ss"
+        this.defaultFilter := {DEBUG: 1, INFO: 1, WARN: 1, ERROR: 1, LOAD: 1}
+        this.logs := []                  ; Todos os logs (ordenados: índice 1 = mais novo)
+        this.filteredLogs := []
+        this.searchText := ""
+        this.activeScripts := []
+        this.selectedScripts := {}
+        this.maxLogsPerScript := 10      ; Agora: limite por script por TIPO
+        this.logCounts := {}             ; Estrutura: logCounts[script][tipo] := count
+        this.connectedClients := 0
+        this.logsReceived := 0
+        this.scriptStats := {}           ; Estatísticas processadas (total histórico)
+        this.virtualMode := true
+        this.lastScrollPos := 1
+        this.lastSelectedScript := ""
+        this.updateThreshold := 15
+        this.pendingUpdate := false
+        this.lastFilterChange := 0
+        this.listViewPaused := false
+        this.warnErrorBuffer := []
+        this.maxWarnErrorBuffer := 50
+        this.warnErrorWindowOpen := false
+        DebugLogSmart("[SERVER] Instância LoggerServer criada (porta: " . this.port . ")")
     }
-    else if (sEvent = "RECEIVED") {
-        dataStr := StrGet(&bData, bDataLength, "UTF-8")
 
-        partes := StrSplit(dataStr, "||")
-        tipo := "N/A"
-        scriptName := "N/A"
-        mensagem := "N/A"
-
-        for _, parte in partes {
-            if (SubStr(parte, 1, 5) = "tipo=" || SubStr(parte, 1, 5) = "type=")
-                tipo := SubStr(parte, 6)
-            else if (SubStr(parte, 1, 11) = "scriptName=")
-                scriptName := SubStr(parte, 12)
-            else if (SubStr(parte, 1, 9) = "mensagem=" || SubStr(parte, 1, 8) = "message=")
-                mensagem := SubStr(parte, InStr(parte, "=") + 1)
-        }
-
-        ; Registra ou atualiza cliente na lista de conexões
-        g_ClientConnections[iSocket] := {socket: iSocket, ip: sAddr, script: scriptName}
-
-        AddScriptToRegistry(scriptName)
-        UpdateScriptStats(scriptName, tipo)
-        FormatTime, timestamp,, %TimestampFormat%
-        iLogsReceived++
-        SB_SetText("Logs recebidos: " iLogsReceived, 1)
-        
-        newMsg := {timestamp: timestamp, socket: iSocket, ip: sAddr, tipo: tipo, script: scriptName, mensagem: mensagem}
-        
-        ; Adiciona ao buffer WARN/ERROR se necessário
-        AddToWarnErrorBuffer(newMsg)
-        
-        wasRemoved := AddLogWithLimit(newMsg)
-        
-        ; Só atualiza ListView se não estiver pausado
-        if (!g_ListViewPaused) {
-            ApplyFiltersSmartUpdate(newMsg, wasRemoved)
-        }
-        
-        UpdateScriptSpecificStatsIfSelected(scriptName)
+    Start() {
+        this.InitGUI()
+        this.StartListening()
+        SetTimer, Server_ProcessPendingUpdates, 500
+        DebugLogSmart("[SERVER] Start concluído.")
     }
-    else if (sEvent = "DISCONNECTED") {
-        iConnectedClients--
-        if (iConnectedClients < 0)
-            iConnectedClients := 0
-        SB_SetText("Clientes conectados: " iConnectedClients, 2)
 
-        scriptName := ""
-        ; Procurar o script pelo socket na lista de conexões
-        if (g_ClientConnections.HasKey(iSocket)) {
-            scriptName := g_ClientConnections[iSocket].script
-            g_ClientConnections.Delete(iSocket)  ; Remove da lista
-        } else {
-            ; Fallback: procurar nos logs (método antigo)
-            for index, item in g_aLogs {
+    InitGUI() {
+		Global
+        Gui, +Resize +MinSize580x420 +AlwaysOnTop
+        Gui, Color, FFFFFF
+        Gui, Font, s10, Segoe UI
+
+        Gui, Add, Text, x10 y10 w350 h25,% "Servidor de Log (Porta: " . this.port . ")"
+        Gui, Add, Button, x+15 w90 h35 gServer_ClearLogs, Limpar
+        Gui, Add, Button, x+10 w120 h35 gServer_ExportLogs, Exportar Logs
+        Gui, Add, Button, x+10 w140 h35 gServer_ShowWarnErrorBuffer, Analisar WARN/ERROR
+
+        Gui, Add, GroupBox, x10 y55 w520 h180, Filtros e Configurações
+
+        Gui, Add, Checkbox, x20 y80 w85 h25 vChkDEBUG gServer_ApplyFilters Checked, DEBUG
+        Gui, Add, Checkbox, x+5 w85 h25 vChkINFO gServer_ApplyFilters Checked, INFO
+        Gui, Add, Checkbox, x+5 w85 h25 vChkWARN gServer_ApplyFilters Checked, WARN
+        Gui, Add, Checkbox, x+5 w85 h25 vChkERROR gServer_ApplyFilters Checked, ERROR
+        Gui, Add, Checkbox, x+5 w60 h25 vChkLOAD gServer_ApplyFilters Checked, LOAD
+
+        Gui, Add, Text, x20 y110 w70 h25, Buscar:
+        Gui, Add, Edit, x95 y107 w370 h25 vSearchText gServer_SearchChanged,
+
+        Gui, Add, Text, x20 y140 w160 h25,% "Limite por tipo/script:"
+        Gui, Add, Edit, x185 y137 w80 h25 vMaxLogsInput gServer_UpdateMaxLogs Number,% this.maxLogsPerScript
+        Gui, Add, Button, x270 y136 w70 h27 gServer_ApplyMaxLogs, Aplicar
+
+        Gui, Add, Checkbox, x20 y170 w160 h25 vVirtualMode gServer_ToggleVirtualMode Checked, Modo Virtualizado
+        Gui, Add, Checkbox, x200 y170 w180 h25 vPauseListView gServer_TogglePauseListView, Pausar atualização
+
+        Gui, Add, Text, x390 y170 w120 h25 vPauseIndicator Center +Border, PAUSADO
+        GuiControl, Hide, PauseIndicator
+
+        Gui, Add, ListView, x10 y245 w250 r18 vScriptsListView +Checked +LV0x10000 gServer_ScriptsListViewChanged AltSubmit, Scripts
+        LV_Add("", "Todos")
+        this.selectedScripts["Todos"] := 0
+
+        Gui, Add, GroupBox, x550 y55 w650 h180, Estatísticas
+        Gui, Add, Text, x570 y80 w620 h45 vStatsTextGlobal, Scripts conectados: 0 | Logs armazenados: 0 (processados: 0)
+        Gui, Add, Text, x570 y130 w620 h2 0x10
+        Gui, Add, Text, x570 y140 w620 h85 vStatsTextScript, Selecione um script específico para ver estatísticas detalhadas
+
+        Gui, Add, ListView, x270 y245 w880 r18 vLogView -Multi +Grid +LV0x10000, Timestamp|Socket|IP|Tipo|Script|Mensagem
+        this.ResizeListViewColumns()
+
+        Gui, Add, StatusBar
+        SB_SetParts(200, 150, 200, 230)
+        SB_SetText("Logs exibidos: 0", 1)
+        SB_SetText("Clientes conectados: 0", 2)
+        SB_SetText("Scripts únicos: 0", 3)
+        SB_SetText("Status: Ativo | WARN/ERROR: 0", 4)
+
+        SysGet, MonitorWorkArea, MonitorWorkArea
+        serverX := 10
+        serverY := MonitorWorkAreaBottom - 700
+        Gui, Show, x%serverX% y%serverY% w1220 h700, Logger Server v1.3.1
+
+        DebugLogSmart("[SERVER] GUI inicializada.")
+    }
+
+    StartListening() {
+        err := AHKsock_Listen(this.port, "SocketEventHandler")
+        DebugLogSmart("[SERVER] AHKsock_Listen chamado. Porta: " . this.port . " | Resultado: " . (err ? err : "Ativado"))
+        if (err) {
+            MsgBox, 16, Erro,% "Falha ao iniciar o servidor na porta " this.port . "`nErro AHKsock: " . err . "`nErrorLevel: " . ErrorLevel
+            ExitApp
+        }
+    }
+
+    ProcessPendingUpdates() {
+        if (this.pendingUpdate && A_TickCount - this.lastFilterChange > 800) {
+            this.pendingUpdate := false
+            this.ApplyFiltersOptimized(true)
+        }
+    }
+
+    HandleSocketEvent(sEvent, iSocket, sName, sAddr, sPort, ByRef bData, bDataLength) {
+        if (sEvent = "ACCEPTED") {
+            this.connectedClients++
+            SB_SetText("Clientes conectados: " . this.connectedClients, 2)
+        }
+        else if (sEvent = "RECEIVED") {
+            dataStr := StrGet(&bData, bDataLength, "UTF-8")
+            partes := StrSplit(dataStr, "||")
+            tipo := "N/A", scriptName := "N/A", mensagem := "N/A"
+
+            for _, parte in partes {
+                if (SubStr(parte, 1, 5) = "tipo=" || SubStr(parte, 1, 5) = "type=")
+                    tipo := SubStr(parte, 6)
+                else if (SubStr(parte, 1, 11) = "scriptName=")
+                    scriptName := SubStr(parte, 12)
+                else if (SubStr(parte, 1, 9) = "mensagem=" || SubStr(parte, 1, 8) = "message=")
+                    mensagem := SubStr(parte, InStr(parte, "=") + 1)
+            }
+
+            this.AddScriptToRegistry(scriptName)
+            this.UpdateScriptStats(scriptName, tipo)
+            FormatTime, timestamp,, % this.timestampFormat
+            this.logsReceived++
+            SB_SetText("Logs exibidos: " . LV_GetCount() . " / " . this.logs.Length(), 1)
+
+            newMsg := {timestamp: timestamp, socket: iSocket, ip: sAddr, tipo: tipo, script: scriptName, mensagem: mensagem}
+            this.AddToWarnErrorBuffer(newMsg)
+            wasRemoved := this.AddLogWithLimit(newMsg)
+
+            if (!this.listViewPaused) {
+                this.ApplyFiltersSmartUpdate(newMsg, wasRemoved)
+            }
+            this.UpdateScriptSpecificStatsIfSelected(scriptName)
+            this.UpdateStatsDisplay()
+        }
+        else if (sEvent = "DISCONNECTED") {
+            this.connectedClients--
+            if (this.connectedClients < 0)
+                this.connectedClients := 0
+            SB_SetText("Clientes conectados: " . this.connectedClients, 2)
+
+            scriptName := ""
+            for index, item in this.logs {
                 if (item.socket = iSocket && item.ip = sAddr && item.script != "N/A") {
                     scriptName := item.script
                     break
                 }
             }
-        }
-
-        FormatTime, timestamp,, %TimestampFormat%
-        disconnectMsg := {timestamp: timestamp, socket: iSocket, ip: sAddr, tipo: "INFO", script: scriptName, mensagem: "Script desconectado"}
-        wasRemoved := AddLogWithLimit(disconnectMsg)
-        
-        ; Só atualiza ListView se não estiver pausado
-        if (!g_ListViewPaused) {
-            ApplyFiltersSmartUpdate(disconnectMsg, wasRemoved)
-        }
-    }
-}
-
-; Adiciona WARN e ERROR ao buffer separado
-AddToWarnErrorBuffer(newMsg) {
-    global g_WarnErrorBuffer, g_MaxWarnErrorBuffer
-    
-    if (newMsg.tipo = "WARN" || newMsg.tipo = "ERROR") {
-        ; Adiciona no início do array
-        g_WarnErrorBuffer.InsertAt(1, newMsg)
-        
-        ; Remove excesso se necessário
-        while (g_WarnErrorBuffer.Length() > g_MaxWarnErrorBuffer) {
-            g_WarnErrorBuffer.RemoveAt(g_WarnErrorBuffer.Length())
-        }
-        
-        ; Atualiza StatusBar
-        UpdateWarnErrorCount()
-        DebugLogSmart("[SERVER] Adicionado ao buffer WARN/ERROR: " . newMsg.tipo . " - " . newMsg.script)
-    }
-}
-
-; Atualiza contador WARN/ERROR na StatusBar
-UpdateWarnErrorCount() {
-    global g_WarnErrorBuffer, g_ListViewPaused
-    warnCount := 0
-    errorCount := 0
-    
-    for _, item in g_WarnErrorBuffer {
-        if (item.tipo = "WARN")
-            warnCount++
-        else if (item.tipo = "ERROR")
-            errorCount++
-    }
-    
-    statusText := "Status: " . (g_ListViewPaused ? "Pausado" : "Ativo") 
-                . " | W:" . warnCount . "/E:" . errorCount . " (" . g_WarnErrorBuffer.Length() . "/50)"
-    SB_SetText(statusText, 4)
-}
-
-; Exibe janela de análise de WARN/ERROR
-ShowWarnErrorBuffer:
-    global g_WarnErrorBuffer
-    
-    if (g_WarnErrorBuffer.Length() = 0) {
-        MsgBox, 64, Buffer WARN/ERROR, Nenhum evento WARN ou ERROR foi registrado ainda.
-        return
-    }
-    
-    ; Criar GUI de análise
-    Gui, WarnError:+Resize +MinSize600x400 +AlwaysOnTop
-    Gui, WarnError:Color, FFFFFF
-    Gui, WarnError:Font, s10, Segoe UI
-    
-    ; Título e estatísticas
-    warnCount := 0
-    errorCount := 0
-    for _, item in g_WarnErrorBuffer {
-        if (item.tipo = "WARN")
-            warnCount++
-        else if (item.tipo = "ERROR")
-            errorCount++
-    }
-    
-    titleText := "Análise de WARN/ERROR - Total: " . g_WarnErrorBuffer.Length() 
-               . " (WARN: " . warnCount . " | ERROR: " . errorCount . ")"
-    Gui, WarnError:Add, Text, x10 y10 w580 h25 Center, %titleText%
-    
-    ; Filtros específicos
-    Gui, WarnError:Add, GroupBox, x10 y40 w580 h50, Filtros
-    Gui, WarnError:Add, Checkbox, x20 y60 w80 h25 vWEChkWARN gFilterWarnError Checked, WARN
-    Gui, WarnError:Add, Checkbox, x+20 w80 h25 vWEChkERROR gFilterWarnError Checked, ERROR
-    Gui, WarnError:Add, Text, x+20 w60 h25, Script:
-    Gui, WarnError:Add, ComboBox, x+5 w150 h200 vWEScriptFilter gFilterWarnError, Todos
-    
-    ; Preencher ComboBox com scripts únicos
-    scriptsInBuffer := {}
-    for _, item in g_WarnErrorBuffer {
-        scriptsInBuffer[item.script] := true
-    }
-    for script in scriptsInBuffer {
-        GuiControl, WarnError:, WEScriptFilter, %script%
-    }
-    
-    ; ListView dos eventos - POSICIONAMENTO CORRETO
-    Gui, WarnError:Add, ListView, x10 y100 w580 r20 vWELogView -Multi +Grid, Timestamp|Tipo|Script|Mensagem
-    
-    ; Calcular posição Y correta para os botões
-    ; Y da ListView (100) + altura da ListView (20 linhas * 16px + header + bordas) ≈ 100 + 340 = 440
-    buttonY := 450
-    
-    ; Botões na posição correta
-    Gui, WarnError:Add, Button, x10 y%buttonY% w100 h30 gExportWarnError, Exportar CSV
-    Gui, WarnError:Add, Button, x120 y%buttonY% w100 h30 gClearWarnError, Limpar Buffer
-    Gui, WarnError:Add, Button, x490 y%buttonY% w100 h30 gCloseWarnError, Fechar
-    
-    ; Altura total da janela
-    totalHeight := buttonY + 45
-    
-    ; Posicionar janela
-    Gui, WarnError:Show, w600 h%totalHeight%, Análise WARN/ERROR
-    
-    ; Preencher ListView inicial
-    FilterWarnErrorList()
-return
-
-; Filtros da janela WARN/ERROR
-FilterWarnError:
-    FilterWarnErrorList()
-return
-
-FilterWarnErrorList() {
-    global g_WarnErrorBuffer
-    
-    Gui, WarnError:Submit, NoHide
-    
-    ; CORRIGIDO: Definir a ListView correta antes de popular
-    Gui, WarnError:ListView, WELogView
-    LV_Delete()
-    
-    ; Filtrar e adicionar itens
-    for _, item in g_WarnErrorBuffer {
-        showItem := true
-        
-        ; Filtro por tipo
-        if (item.tipo = "WARN" && !WEChkWARN)
-            showItem := false
-        if (item.tipo = "ERROR" && !WEChkERROR)
-            showItem := false
-        
-        ; Filtro por script
-        if (WEScriptFilter != "Todos" && item.script != WEScriptFilter)
-            showItem := false
-        
-        if (showItem) {
-            LV_Add("", item.timestamp, item.tipo, item.script, item.mensagem)
-        }
-    }
-    
-    ; Redimensionar colunas
-    LV_ModifyCol(1, 140)  ; Timestamp
-    LV_ModifyCol(2, 60)   ; Tipo
-    LV_ModifyCol(3, 120)  ; Script
-    LV_ModifyCol(4, 240)  ; Mensagem
-}
-
-; Exportar buffer WARN/ERROR
-ExportWarnError:
-    global g_WarnErrorBuffer
-    
-    FormatTime, timestamp,, yyyy-MM-dd_HHmmss
-    FileSelectFile, outputFile, S16, %A_Desktop%\warn_error_analysis_%timestamp%.csv, Exportar WARN/ERROR, CSV Files (*.csv)
-    if (outputFile = "")
-        return
-    if !InStr(outputFile, ".csv")
-        outputFile .= ".csv"
-    
-    fileContent := "Timestamp,Tipo,Script,Mensagem`n"
-    for _, item in g_WarnErrorBuffer {
-        mensagemEscaped := RegExReplace(item.mensagem, """", """""")
-        scriptEscaped := RegExReplace(item.script, """", """""")
-        fileContent .= item.timestamp . ","
-                    . item.tipo . ","
-                    . """" . scriptEscaped . """" . ","
-                    . """" . mensagemEscaped . """`n"
-    }
-    
-    FileDelete, %outputFile%
-    FileAppend, %fileContent%, %outputFile%, UTF-8
-    
-    if (!ErrorLevel) {
-        MsgBox, 64, Exportação, Eventos WARN/ERROR exportados com sucesso!`n%outputFile%
-    }
-return
-
-; Limpar buffer WARN/ERROR
-ClearWarnError:
-    MsgBox, 36, Confirmação, Tem certeza que deseja limpar o buffer de WARN/ERROR?`n`nEsta ação não pode ser desfeita.
-    IfMsgBox, Yes
-    {
-        g_WarnErrorBuffer := []
-        UpdateWarnErrorCount()
-        FilterWarnErrorList()
-        DebugLogSmart("[SERVER] Buffer WARN/ERROR limpo")
-    }
-return
-
-; Fechar janela de análise
-CloseWarnError:
-    Gui, WarnError:Destroy
-return
-
-; Toggle para pausar/despausar atualização da ListView
-TogglePauseListView:
-    GuiControlGet, PauseListView
-    g_ListViewPaused := PauseListView
-    
-    if (g_ListViewPaused) {
-        ; Pausado - mostra indicador visual
-        GuiControl, Show, PauseIndicator
-        GuiControl,, PauseIndicator, ⏸ PAUSADO
-        UpdateWarnErrorCount()
-        DebugLogSmart("[SERVER] ListView pausada")
-    } else {
-        ; Despausado - esconde indicador e força atualização
-        GuiControl, Hide, PauseIndicator
-        UpdateWarnErrorCount()
-        DebugLogSmart("[SERVER] ListView despausada - forçando atualização")
-        ; Força rebuild completo para sincronizar com logs acumulados
-        ApplyFiltersOptimized(true)
-    }
-return
-
-; Toggle para aplicar limite global ou por script
-ToggleGlobalLimit:
-    GuiControlGet, UseGlobalLimit
-    g_UseGlobalLimit := UseGlobalLimit
-    DebugLogSmart("[SERVER] Modo de limite " . (g_UseGlobalLimit ? "global" : "por script") . " ativado")
-return
-
-; Update inteligente que limpa logs antigos sem rebuild
-ApplyFiltersSmartUpdate(newItem, wasLogRemoved := false) {
-    global g_aLogs, g_FilteredLogs, g_VirtualMode, g_ListViewPaused
-    
-    ; Se pausado, não atualiza a ListView
-    if (g_ListViewPaused) {
-        return
-    }
-    
-    if (!g_VirtualMode) {
-        ApplyFiltersOptimized(true)
-        return
-    }
-    
-    Gui, ListView, LogView
-    
-    ; Se um log foi removido dos dados, precisa sincronizar a ListView
-    if (wasLogRemoved) {
-        ; Remove item mais antigo da ListView (se existir na visualização)
-        RemoveOldestFromListView(newItem.script)
-    }
-    
-    ; Verifica se o novo log passaria pelos filtros atuais
-    if (ShouldShowItem(newItem)) {
-        ; Adiciona o novo item no topo da ListView
-        LV_Insert(1, "", newItem.timestamp, newItem.socket, newItem.ip, newItem.tipo, newItem.script, newItem.mensagem)
-        g_FilteredLogs.InsertAt(1, newItem)
-        
-        ; Atualiza status bar
-        SB_SetText("Logs exibidos: " . LV_GetCount() . " / " . g_aLogs.Length(), 1)
-    }
-}
-
-; Remove o item mais antigo do mesmo script da ListView
-RemoveOldestFromListView(scriptName) {
-    global g_FilteredLogs
-    
-    Gui, ListView, LogView
-    
-    ; Procura o item mais antigo do mesmo script na ListView (de baixo para cima)
-    Loop, % LV_GetCount() {
-        reverseIndex := LV_GetCount() - A_Index + 1
-        if (reverseIndex > 0) {
-            LV_GetText(lvScript, reverseIndex, 5)  ; Coluna 5 = Script
-            if (lvScript = scriptName) {
-                ; Remove da ListView e do array filtrado
-                LV_Delete(reverseIndex)
-                if (reverseIndex <= g_FilteredLogs.Length()) {
-                    g_FilteredLogs.RemoveAt(reverseIndex)
-                }
-                break
+            FormatTime, timestamp,, % this.timestampFormat
+            disconnectMsg := {timestamp: timestamp, socket: iSocket, ip: sAddr, tipo: "INFO", script: scriptName, mensagem: "Script desconectado"}
+            wasRemoved := this.AddLogWithLimit(disconnectMsg)
+            if (!this.listViewPaused) {
+                this.ApplyFiltersSmartUpdate(disconnectMsg, wasRemoved)
             }
+            this.UpdateStatsDisplay()
         }
     }
-}
 
-; --------- Limite global simplificado ---------
-AddLogWithLimit(newMsg) {
-    global g_aLogs, g_LogCounts, g_MaxLogsPerScript, g_UseGlobalLimit
-
-    scriptName := newMsg.script
-    if (!g_LogCounts.HasKey(scriptName))
-        g_LogCounts[scriptName] := 0
-
-    wasRemoved := false
-    
-    ; Remove logs antigos se necessário ANTES de adicionar
-    if (g_LogCounts[scriptName] >= g_MaxLogsPerScript) {
-        Loop, % g_aLogs.Length() {
-            reverseIndex := g_aLogs.Length() - A_Index + 1
-            if (reverseIndex > 0 && g_aLogs[reverseIndex].script = scriptName) {
-                g_aLogs.RemoveAt(reverseIndex)
-                g_LogCounts[scriptName]--
-                wasRemoved := true
-                break
-            }
+    ; ---------------------- WARN/ERROR BUFFER ----------------------
+    AddToWarnErrorBuffer(newMsg) {
+        if (newMsg.tipo = "WARN" || newMsg.tipo = "ERROR") {
+            this.warnErrorBuffer.InsertAt(1, newMsg)
+            while (this.warnErrorBuffer.Length() > this.maxWarnErrorBuffer)
+                this.warnErrorBuffer.RemoveAt(this.warnErrorBuffer.Length())
+            this.UpdateWarnErrorCount()
         }
     }
-    
-    ; Adiciona o novo log
-    g_aLogs.InsertAt(1, newMsg)
-    g_LogCounts[scriptName]++
-    
-    ; Verificação de segurança
-    if (g_LogCounts[scriptName] > g_MaxLogsPerScript) {
-        Loop, % g_aLogs.Length() {
-            reverseIndex := g_aLogs.Length() - A_Index + 1
-            if (reverseIndex > 0 && g_aLogs[reverseIndex].script = scriptName) {
-                g_aLogs.RemoveAt(reverseIndex)
-                g_LogCounts[scriptName]--
-                wasRemoved := true
-                if (g_LogCounts[scriptName] <= g_MaxLogsPerScript)
+
+    UpdateWarnErrorCount() {
+        warnCount := 0, errorCount := 0
+        for _, item in this.warnErrorBuffer {
+            if (item.tipo = "WARN")
+                warnCount++
+            else if (item.tipo = "ERROR")
+                errorCount++
+        }
+        statusText := "Status: " . (this.listViewPaused ? "Pausado" : "Ativo")
+                   . " | W:" . warnCount . "/E:" . errorCount . " (" . this.warnErrorBuffer.Length() . "/50)"
+        SB_SetText(statusText, 4)
+    }
+
+    ShowWarnErrorBuffer() {
+        if (this.warnErrorBuffer.Length() = 0) {
+            MsgBox, 64, Buffer WARN/ERROR, Nenhum evento WARN ou ERROR foi registrado ainda.
+            return
+        }
+        this.warnErrorWindowOpen := true
+
+        Gui, WarnError:+Resize +MinSize600x400 +AlwaysOnTop
+        Gui, WarnError:Color, FFFFFF
+        Gui, WarnError:Font, s10, Segoe UI
+
+        warnCount := 0, errorCount := 0
+        for _, item in this.warnErrorBuffer {
+            if (item.tipo = "WARN")
+                warnCount++
+            else if (item.tipo = "ERROR")
+                errorCount++
+        }
+        titleText := "Análise de WARN/ERROR - Total: " . this.warnErrorBuffer.Length()
+                  . " (WARN: " . warnCount . " | ERROR: " . errorCount . ")"
+        Gui, WarnError:Add, Text, x10 y10 w580 h25 Center,% titleText
+
+        Gui, WarnError:Add, GroupBox, x10 y40 w580 h50, Filtros
+        Gui, WarnError:Add, Checkbox, x20 y60 w80 h25 vWEChkWARN gServer_FilterWarnError Checked, WARN
+        Gui, WarnError:Add, Checkbox, x+20 w80 h25 vWEChkERROR gServer_FilterWarnError Checked, ERROR
+        Gui, WarnError:Add, Text, x+20 w60 h25, Script:
+        Gui, WarnError:Add, ComboBox, x+5 w150 h200 vWEScriptFilter gServer_FilterWarnError, Todos
+
+        scriptsInBuffer := {}
+        for _, item in this.warnErrorBuffer
+            scriptsInBuffer[item.script] := true
+        for scriptName in scriptsInBuffer
+            GuiControl, WarnError:, WEScriptFilter, %scriptName%
+
+        Gui, WarnError:Add, ListView, x10 y100 w580 r20 vWELogView -Multi +Grid, Timestamp|Tipo|Script|Mensagem
+        buttonY := 450
+        Gui, WarnError:Add, Button, x10 y%buttonY% w100 h30 gServer_ExportWarnError, Exportar CSV
+        Gui, WarnError:Add, Button, x120 y%buttonY% w100 h30 gServer_ClearWarnError, Limpar Buffer
+        Gui, WarnError:Add, Button, x490 y%buttonY% w100 h30 gServer_CloseWarnError, Fechar
+
+        totalHeight := buttonY + 45
+        Gui, WarnError:Show, w600 h%totalHeight%, Análise WARN/ERROR
+        this.FilterWarnErrorList()
+    }
+
+    FilterWarnErrorList() {
+        if (!this.warnErrorWindowOpen)
+            return
+        Gui, WarnError:Submit, NoHide
+        Gui, WarnError:ListView, WELogView
+        LV_Delete()
+        for _, item in this.warnErrorBuffer {
+            showItem := true
+            if (item.tipo = "WARN" && !WEChkWARN)
+                showItem := false
+            if (item.tipo = "ERROR" && !WEChkERROR)
+                showItem := false
+            if (WEScriptFilter != "Todos" && item.script != WEScriptFilter)
+                showItem := false
+            if (showItem)
+                LV_Add("", item.timestamp, item.tipo, item.script, item.mensagem)
+        }
+        LV_ModifyCol(1, 140)
+        LV_ModifyCol(2, 60)
+        LV_ModifyCol(3, 120)
+        LV_ModifyCol(4, 240)
+    }
+
+    ExportWarnError() {
+        FormatTime, timestamp,, yyyy-MM-dd_HHmmss
+        FileSelectFile, outputFile, S16, %A_Desktop%\warn_error_analysis_%timestamp%.csv, Exportar WARN/ERROR, CSV Files (*.csv)
+        if (outputFile = "")
+            return
+        if !InStr(outputFile, ".csv")
+            outputFile .= ".csv"
+        fileContent := "Timestamp,Tipo,Script,Mensagem`n"
+        for _, item in this.warnErrorBuffer {
+            mensagemEscaped := RegExReplace(item.mensagem, """", """""")
+            scriptEscaped := RegExReplace(item.script, """", """""")
+            fileContent .= item.timestamp . "," . item.tipo . "," . """" . scriptEscaped . """" . "," . """" . mensagemEscaped . """`n"
+        }
+        FileDelete, %outputFile%
+        FileAppend, %fileContent%, %outputFile%, UTF-8
+        if (!ErrorLevel)
+            MsgBox, 64, Exportação, Eventos WARN/ERROR exportados com sucesso!`n%outputFile%
+    }
+
+    ClearWarnErrorBuffer() {
+        MsgBox, 36, Confirmação, Tem certeza que deseja limpar o buffer de WARN/ERROR?`n`nEsta ação não pode ser desfeita.
+        IfMsgBox, Yes
+        {
+            this.warnErrorBuffer := []
+            this.UpdateWarnErrorCount()
+            this.FilterWarnErrorList()
+        }
+    }
+
+    CloseWarnErrorWindow() {
+        Gui, WarnError:Destroy
+        this.warnErrorWindowOpen := false
+    }
+
+    ; ---------------------- PAUSA LISTVIEW ----------------------
+    TogglePauseListView() {
+        GuiControlGet, PauseListView
+        this.listViewPaused := PauseListView
+        if (this.listViewPaused) {
+            GuiControl, Show, PauseIndicator
+            GuiControl,, PauseIndicator, ⏸ PAUSADO
+        } else {
+            GuiControl, Hide, PauseIndicator
+            this.ApplyFiltersOptimized(true)
+        }
+        this.UpdateWarnErrorCount()
+    }
+
+    ; ---------------------- UPDATE INTELIGENTE ----------------------
+    ApplyFiltersSmartUpdate(newItem, wasLogRemoved := false) {
+        if (this.listViewPaused)
+            return
+        if (!this.virtualMode) {
+            this.ApplyFiltersOptimized(true)
+            return
+        }
+        Gui, ListView, LogView
+        if (wasLogRemoved)
+            this.RemoveOldestFromListView(newItem.script, newItem.tipo)
+        if (this.ShouldShowItem(newItem)) {
+            LV_Insert(1, "", newItem.timestamp, newItem.socket, newItem.ip, newItem.tipo, newItem.script, newItem.mensagem)
+            this.filteredLogs.InsertAt(1, newItem)
+            SB_SetText("Logs exibidos: " . LV_GetCount() . " / " . this.logs.Length(), 1)
+        }
+    }
+
+    RemoveOldestFromListView(scriptName, tipo) {
+        Gui, ListView, LogView
+        Loop, % LV_GetCount() {
+            reverseIndex := LV_GetCount() - A_Index + 1
+            if (reverseIndex > 0) {
+                LV_GetText(lvScript, reverseIndex, 5)
+                LV_GetText(lvTipo, reverseIndex, 4)
+                if (lvScript = scriptName && lvTipo = tipo) {
+                    LV_Delete(reverseIndex)
+                    if (reverseIndex <= this.filteredLogs.Length())
+                        this.filteredLogs.RemoveAt(reverseIndex)
                     break
+                }
             }
         }
     }
-    
-    return wasRemoved
-}
 
-; --------- Comandos Reversos ---------
-SendCommand:
-    Gui, Submit, NoHide
-    GuiControlGet, CommandText
-    
-    if (CommandText = "") {
-        MsgBox, 48, Comando Vazio, Por favor, insira um comando para enviar.
-        return
-    }
-    
-    ; Determinar para quais scripts enviar o comando
-    scripts := []
-    targets := []
-    
-    ; Selecionar alvos baseado na seleção de scripts
-    Gui, ListView, ScriptsListView
-    selectedAll := SelectedScripts["Todos"] = 1
-    
-    if (selectedAll) {
-        ; Enviar para todos os clientes conectados
-        for socket, client in g_ClientConnections {
-            targets.Push(socket)
-            scripts.Push(client.script)
-        }
-    } else {
-        ; Enviar apenas para scripts selecionados
-        for script, isSelected in SelectedScripts {
-            if (isSelected = 1 && script != "Todos") {
-                ; Encontrar sockets para este script
-                for socket, client in g_ClientConnections {
-                    if (client.script = script) {
-                        targets.Push(socket)
-                        scripts.Push(script)
+    ; ---------------------- NOVA LÓGICA DE LIMITE (por script + tipo) ----------------------
+    AddLogWithLimit(newMsg) {
+        scriptName := newMsg.script
+        tipo := newMsg.tipo
+        if (!this.logCounts.HasKey(scriptName))
+            this.logCounts[scriptName] := {}
+        if (!this.logCounts[scriptName].HasKey(tipo))
+            this.logCounts[scriptName][tipo] := 0
+
+        wasRemoved := false
+        if (this.logCounts[scriptName][tipo] >= this.maxLogsPerScript) {
+            ; Remove o mais antigo daquele script + tipo
+            Loop, % this.logs.Length() {
+                reverseIndex := this.logs.Length() - A_Index + 1
+                if (reverseIndex > 0) {
+                    tmp := this.logs[reverseIndex]
+                    if (tmp.script = scriptName && tmp.tipo = tipo) {
+                        this.logs.RemoveAt(reverseIndex)
+                        this.logCounts[scriptName][tipo]--
+                        wasRemoved := true
                         break
                     }
                 }
             }
         }
-    }
-    
-    if (!targets.Length()) {
-        MsgBox, 48, Sem Destinatários, Nenhum cliente selecionado para receber o comando.`nSelecione pelo menos um script na lista.
-        return
-    }
-    
-    ; Perguntar se deseja realmente enviar
-    scriptsList := ""
-    for i, script in scripts {
-        scriptsList .= "• " . script . "`n"
+        this.logs.InsertAt(1, newMsg)
+        this.logCounts[scriptName][tipo]++
+        ; Segurança: se passou do limite, remove extras
+        while (this.logCounts[scriptName][tipo] > this.maxLogsPerScript) {
+            Loop, % this.logs.Length() {
+                reverseIndex := this.logs.Length() - A_Index + 1
+                if (reverseIndex > 0) {
+                    tmp := this.logs[reverseIndex]
+                    if (tmp.script = scriptName && tmp.tipo = tipo) {
+                        this.logs.RemoveAt(reverseIndex)
+                        this.logCounts[scriptName][tipo]--
+                        wasRemoved := true
+                        if (this.logCounts[scriptName][tipo] <= this.maxLogsPerScript)
+                            break
+                    }
+                }
+            }
+        }
+        return wasRemoved
     }
 
-    MsgBox, 36, Confirmar Envio,% "Deseja enviar o comando:`n" CommandText "`n`nPara os seguintes scripts " (targets.Length()) ":`n" scriptsList
-    IfMsgBox, No
-        return
-    
-    ; Enviar o comando para cada socket
-    successCount := 0
-    for i, socket in targets {
-        success := SendReverseCommand(socket, CommandText)
-        if (success)
-            successCount++
-    }
-    
-    ; Criar log do envio do comando
-    FormatTime, timestamp,, %TimestampFormat%
-    cmdMsg := {	timestamp: timestamp, socket: -1, ip: "local", tipo: "INFO", script: "Logger-Server"
-			,	mensagem: "Comando enviado: '" . CommandText . "' para " . successCount . "/" . targets.Length() . " scripts"}
-    AddLogWithLimit(cmdMsg)
-    
-    ; Limpar o campo de comando se foi enviado com sucesso
-    if (successCount > 0) {
-        GuiControl,, CommandText,
-        
-        ; Atualizar ListView se não estiver pausada
-        if (!g_ListViewPaused) {
-            ApplyFiltersSmartUpdate(cmdMsg)
+    ApplyMaxLogs() {
+        GuiControlGet, MaxLogsInput
+        if (MaxLogsInput > 0 && MaxLogsInput <= 10000) {
+            this.maxLogsPerScript := MaxLogsInput
+            this.TrimLogsToLimit()
+            if (!this.listViewPaused)
+                this.ApplyFiltersOptimized(true)
+            this.UpdateStatsDisplay()
         }
     }
-return
 
-; Envia comando reverso para um cliente específico
-SendReverseCommand(socketId, commandText) {
-    VarSetCapacity(utf8, StrPut(commandText, "UTF-8"))
-    StrPut(commandText, &utf8, "UTF-8")
-    bytesToSend := StrPut(commandText, "UTF-8") - 1
-    
-    err := AHKsock_ForceSend(socketId, &utf8, bytesToSend)
-    
-    if (err) {
-        DebugLogSmart("[SERVER] Erro ao enviar comando reverso para socket " . socketId . ": " . err)
-        return false
-    }
-    
-    DebugLogSmart("[SERVER] Comando reverso enviado com sucesso para socket " . socketId)
-    return true
-}
-
-; --------- GUI handlers ---------
-ApplyMaxLogs:
-    GuiControlGet, MaxLogsInput
-    if (MaxLogsInput > 0 && MaxLogsInput <= 10000) {
-        g_MaxLogsPerScript := MaxLogsInput
-        TrimLogsToLimit()
-        ; Se não estiver pausado, atualiza a ListView
-        if (!g_ListViewPaused) {
-            ApplyFiltersOptimized(true)
+    TrimLogsToLimit() {
+        newLogs := []
+        newCounts := {}
+        ; Percorre em ordem do mais novo ao mais antigo já respeitando prioridade dos mais novos
+        for _, item in this.logs {
+            s := item.script
+            t := item.tipo
+            if (!newCounts.HasKey(s))
+                newCounts[s] := {}
+            if (!newCounts[s].HasKey(t))
+                newCounts[s][t] := 0
+            if (newCounts[s][t] < this.maxLogsPerScript) {
+                newLogs.Push(item)
+                newCounts[s][t]++
+            }
         }
-        UpdateStatsDisplay()
+        this.logs := newLogs
+        this.logCounts := newCounts
+        this.filteredLogs := []
     }
-return
 
-TrimLogsToLimit() {
-    global g_aLogs, g_LogCounts, g_MaxLogsPerScript, g_FilteredLogs, g_UseGlobalLimit
-
-    ; Reset contadores
-    for script in g_LogCounts
-        g_LogCounts[script] := 0
-    
-    newLogs := []
-    for _, item in g_aLogs {
-        scriptName := item.script
-        if (!g_LogCounts.HasKey(scriptName))
-            g_LogCounts[scriptName] := 0
-        if (g_LogCounts[scriptName] < g_MaxLogsPerScript) {
-            newLogs.Push(item)
-            g_LogCounts[scriptName]++
+    UpdateMaxLogs() {
+        GuiControlGet, MaxLogsInput
+        if (MaxLogsInput > 0 && MaxLogsInput <= 10000) {
+            this.maxLogsPerScript := MaxLogsInput
+            this.UpdateStatsDisplay()
         }
     }
-    g_aLogs := newLogs
-    
-    ; Limpa g_FilteredLogs para forçar reconstrução
-    g_FilteredLogs := []
-}
 
-UpdateMaxLogs:
-    GuiControlGet, MaxLogsInput
-    if (MaxLogsInput > 0 && MaxLogsInput <= 10000) {
-        g_MaxLogsPerScript := MaxLogsInput
-        UpdateStatsDisplay()
+    ToggleVirtualMode() {
+        GuiControlGet, VirtualMode
+        this.virtualMode := VirtualMode
+        this.UpdateWarnErrorCount()
+        if (!this.listViewPaused)
+            this.ScheduleUpdate()
     }
-return
 
-ToggleVirtualMode:
-    GuiControlGet, VirtualMode
-    g_VirtualMode := VirtualMode
-    UpdateWarnErrorCount()
-    ; Se não estiver pausado, aplica a mudança
-    if (!g_ListViewPaused) {
-        ScheduleUpdate()
+    ScheduleUpdate() {
+        this.pendingUpdate := true
+        this.lastFilterChange := A_TickCount
     }
-return
 
-; Agenda atualização em vez de fazer imediatamente
-ScheduleUpdate() {
-    global g_PendingUpdate, g_LastFilterChange
-    g_PendingUpdate := true
-    g_LastFilterChange := A_TickCount
-}
+    ; ---------------------- AÇÕES GERAIS ----------------------
+    ClearLogs() {
+        Gui, ListView, LogView
+        LV_Delete()
+        this.logs := []
+        this.filteredLogs := []
+        this.logsReceived := 0
+        SB_SetText("Logs exibidos: 0", 1)
+        this.logCounts := {}
+        for i, scriptName in this.activeScripts
+            if (this.scriptStats.HasKey(scriptName)) {
+                this.scriptStats[scriptName, "DEBUG"] := 0
+                this.scriptStats[scriptName, "INFO"] := 0
+                this.scriptStats[scriptName, "WARN"] := 0
+                this.scriptStats[scriptName, "ERROR"] := 0
+                this.scriptStats[scriptName, "LOAD"] := 0
+                this.scriptStats[scriptName, "total"] := 0
+            }
+        this.UpdateStatsDisplay()
+        GuiControl,, StatsTextScript, Selecione um script específico para ver estatísticas detalhadas
+    }
 
-ClearLogs:
-    Gui, ListView, LogView
-    LV_Delete()
-    g_aLogs := []
-    g_FilteredLogs := []
-    iLogsReceived := 0
-    SB_SetText("Logs recebidos: 0", 1)
-    for script in g_LogCounts
-        g_LogCounts[script] := 0
-    for i, script in ActiveScripts
-        if (ScriptStats.HasKey(script)) {
-            ScriptStats[script, "DEBUG"] := 0
-            ScriptStats[script, "INFO"] := 0
-            ScriptStats[script, "WARN"] := 0
-            ScriptStats[script, "ERROR"] := 0
-            ScriptStats[script, "LOAD"] := 0
-            ScriptStats[script, "total"] := 0
+    ExportLogs() {
+        FormatTime, timestamp,, yyyy-MM-dd_HHmmss
+        FileSelectFile, outputFile, S16, %A_Desktop%\logs_%timestamp%.csv, Salvar logs como CSV, CSV Files (*.csv)
+        if (outputFile = "")
+            return
+        if !InStr(outputFile, ".csv")
+            outputFile .= ".csv"
+        fileContent := "Timestamp,Socket,IP,Tipo,Script,Mensagem`n"
+        for index, item in this.logs {
+            if (this.ShouldShowItem(item)) {
+                mensagemEscaped := RegExReplace(item.mensagem, """", """""")
+                scriptEscaped := RegExReplace(item.script, """", """""")
+                fileContent .= item.timestamp . "," . item.socket . "," . item.ip . "," . item.tipo . ","
+                             . """" . scriptEscaped . """" . "," . """" . mensagemEscaped . """`n"
+            }
         }
-    UpdateStatsDisplay()
-    GuiControl,, StatsTextScript, Selecione um script específico para ver estatísticas detalhadas
-return
-
-ExportLogs:
-    FormatTime, timestamp,, yyyy-MM-dd_HHmmss
-    FileSelectFile, outputFile, S16, %A_Desktop%\logs_%timestamp%.csv, Salvar logs como CSV, CSV Files (*.csv)
-    if (outputFile = "")
-        return
-    if !InStr(outputFile, ".csv")
-        outputFile .= ".csv"
-    fileContent := "Timestamp,Socket,IP,Tipo,Script,Mensagem`n"
-    for index, item in g_aLogs {
-        if (ShouldShowItem(item)) {
-            mensagemEscaped := RegExReplace(item.mensagem, """", """""")
-            scriptEscaped := RegExReplace(item.script, """", """""")
-            fileContent .= item.timestamp . ","
-                        . item.socket . ","
-                        . item.ip . ","
-                        . item.tipo . ","
-                        . """" . scriptEscaped . """" . ","
-                        . """" . mensagemEscaped . """`n"
-        }
+        FileDelete, %outputFile%
+        FileAppend, %fileContent%, %outputFile%, UTF-8
     }
-    FileDelete, %outputFile%
-    FileAppend, %fileContent%, %outputFile%, UTF-8
-return
 
-; --------- Scripts, Filtros, ListView ---------
-AddScriptToRegistry(scriptName) {
-    global ActiveScripts, ScriptStats, SelectedScripts, g_LogCounts
-    if (scriptName = "N/A" || scriptName = "")
-        return
-    isNew := true
-    for i, existingScript in ActiveScripts
-        if (existingScript = scriptName)
-            isNew := false
-    if (isNew) {
-        ActiveScripts.Push(scriptName)
-        if (!ScriptStats.HasKey(scriptName))
-            ScriptStats[scriptName] := {DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0, LOAD: 0, total: 0}
-        if (!g_LogCounts.HasKey(scriptName))
-            g_LogCounts[scriptName] := 0
-        Gui, ListView, ScriptsListView
-        LV_Add("", scriptName)
-        SelectedScripts[scriptName] := 0
-        SB_SetText("Scripts únicos: " . ActiveScripts.Length(), 3)
-    }
-}
-
-UpdateScriptStats(scriptName, logType) {
-    global ScriptStats
-    if (!ScriptStats.HasKey(scriptName))
-        ScriptStats[scriptName] := {DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0, LOAD: 0, total: 0}
-    if (ScriptStats[scriptName].HasKey(logType))
-        ScriptStats[scriptName, logType] += 1
-    ScriptStats[scriptName, "total"] += 1
-    UpdateStatsDisplay()
-}
-
-UpdateScriptSpecificStatsIfSelected(scriptName) {
-    global SelectedScripts, g_LastSelectedScript
-    
-    ; Apenas atualiza se este script está atualmente selecionado
-    if (g_LastSelectedScript = scriptName) {
-        UpdateScriptSpecificStats(scriptName)
-    }
-}
-
-UpdateStatsDisplay() {
-    global ScriptStats, ActiveScripts, g_LogCounts, g_MaxLogsPerScript
-    totalDebug := 0, totalInfo := 0, totalWarn := 0, totalError := 0, totalLoad := 0, totalProcessed := 0
-    totalStored := 0
-    
-    for i, script in ActiveScripts
-        if (ScriptStats.HasKey(script)) {
-            totalDebug += ScriptStats[script, "DEBUG"]
-            totalInfo += ScriptStats[script, "INFO"]
-            totalWarn += ScriptStats[script, "WARN"]
-            totalError += ScriptStats[script, "ERROR"]
-            totalLoad += ScriptStats[script, "LOAD"]
-            totalProcessed += ScriptStats[script, "total"]
-        }
-    
-    for script, count in g_LogCounts
-        totalStored += count
-    
-    statsText := "Scripts conectados: " . ActiveScripts.Length() 
-              . " | Logs armazenados: " . totalStored . " (processados: " . totalProcessed . ")"
-              . " | Limite: " . g_MaxLogsPerScript . "/script"
-              . "`nDEBUG=" . totalDebug 
-              . " | INFO=" . totalInfo 
-              . " | WARN=" . totalWarn 
-              . " | ERROR=" . totalError
-              . " | LOAD=" . totalLoad
-    GuiControl,, StatsTextGlobal, %statsText%
-}
-
-UpdateScriptSpecificStats(scriptName) {
-    global ScriptStats, SelectedScripts, g_LogCounts, g_MaxLogsPerScript, g_LastSelectedScript
-    
-    g_LastSelectedScript := scriptName
-    scriptStatsText := "Selecione um script específico para ver estatísticas detalhadas"
-    
-    if (scriptName && scriptName != "Todos" && ScriptStats.HasKey(scriptName)) {
-        debug := ScriptStats[scriptName, "DEBUG"]
-        info := ScriptStats[scriptName, "INFO"]
-        warn := ScriptStats[scriptName, "WARN"]
-        error := ScriptStats[scriptName, "ERROR"]
-        load := ScriptStats[scriptName, "LOAD"]
-        total := ScriptStats[scriptName, "total"]
-        currentCount := g_LogCounts.HasKey(scriptName) ? g_LogCounts[scriptName] : 0
-        if (total > 0) {
-            debugPct := Round((debug / total) * 100)
-            infoPct := Round((info / total) * 100)
-            warnPct := Round((warn / total) * 100)
-            errorPct := Round((error / total) * 100)
-            loadPct := Round((load / total) * 100)
-            scriptStatsText := "Script Selecionado: " . scriptName 
-                            . " | Logs armazenados: " . currentCount . "/" . g_MaxLogsPerScript
-                            . " | Total processados: " . total
-                            . "`nDEBUG: " . debug . " (" . debugPct . "%)"
-                            . " | INFO: " . info . " (" . infoPct . "%)"
-                            . " | WARN: " . warn . " (" . warnPct . "%)"
-                            . " | ERROR: " . error . " (" . errorPct . "%)"
-                            . " | LOAD: " . load . " (" . loadPct . "%)"
+    ; ---------------------- SCRIPTS / ESTATÍSTICAS ----------------------
+    AddScriptToRegistry(scriptName) {
+        if (scriptName = "N/A" || scriptName = "")
+            return
+        isNew := true
+        for i, existing in this.activeScripts
+            if (existing = scriptName)
+                isNew := false
+        if (isNew) {
+            this.activeScripts.Push(scriptName)
+            if (!this.scriptStats.HasKey(scriptName))
+                this.scriptStats[scriptName] := {DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0, LOAD: 0, total: 0}
+            if (!this.logCounts.HasKey(scriptName))
+                this.logCounts[scriptName] := {}  ; Inicia mapa de tipos
+            Gui, ListView, ScriptsListView
+            LV_Add("", scriptName)
+            this.selectedScripts[scriptName] := 0
+            SB_SetText("Scripts únicos: " . this.activeScripts.Length(), 3)
         }
     }
-    GuiControl,, StatsTextScript, %scriptStatsText%
-}
 
-ScriptsListViewChanged:
-    if (A_GuiEvent = "C") {
-        LV_GetText(script, A_EventInfo)
+    UpdateScriptStats(scriptName, logType) {
+        if (!this.scriptStats.HasKey(scriptName))
+            this.scriptStats[scriptName] := {DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0, LOAD: 0, total: 0}
+        if (this.scriptStats[scriptName].HasKey(logType))
+            this.scriptStats[scriptName, logType] += 1
+        this.scriptStats[scriptName, "total"] += 1
+    }
+
+    UpdateScriptSpecificStatsIfSelected(scriptName) {
+        selectedScript := ""
+        for s, selected in this.selectedScripts
+            if (s != "Todos" && selected = 1) {
+                selectedScript := s
+                break
+            }
+        if (selectedScript != "" && selectedScript = scriptName)
+            this.UpdateScriptSpecificStats(scriptName)
+    }
+
+    UpdateStatsDisplay() {
+        totalDebug := 0, totalInfo := 0, totalWarn := 0, totalError := 0, totalLoad := 0, totalProcessed := 0, totalStored := 0
+        for i, scriptName in this.activeScripts
+            if (this.scriptStats.HasKey(scriptName)) {
+                totalDebug += this.scriptStats[scriptName, "DEBUG"]
+                totalInfo += this.scriptStats[scriptName, "INFO"]
+                totalWarn += this.scriptStats[scriptName, "WARN"]
+                totalError += this.scriptStats[scriptName, "ERROR"]
+                totalLoad += this.scriptStats[scriptName, "LOAD"]
+                totalProcessed += this.scriptStats[scriptName, "total"]
+            }
+        ; Soma armazenados atuais (limites aplicados) por tipo
+        for s, map in this.logCounts
+            for t, cnt in map
+                totalStored += cnt
+        statsText := "Scripts conectados: " . this.activeScripts.Length()
+                  . " | Logs armazenados: " . totalStored . " (processados: " . totalProcessed . ")"
+                  . " | Limite: " . this.maxLogsPerScript . "/script/tipo"
+                  . "`nDEBUG=" . totalDebug
+                  . " | INFO=" . totalInfo
+                  . " | WARN=" . totalWarn
+                  . " | ERROR=" . totalError
+                  . " | LOAD=" . totalLoad
+        GuiControl,, StatsTextGlobal,% statsText
+    }
+
+    UpdateScriptSpecificStats(scriptName) {
+        this.lastSelectedScript := scriptName
+        scriptStatsText := "Selecione um script específico para ver estatísticas detalhadas"
+        if (scriptName && scriptName != "Todos" && this.scriptStats.HasKey(scriptName)) {
+            debug := this.scriptStats[scriptName, "DEBUG"]
+            info := this.scriptStats[scriptName, "INFO"]
+            warn := this.scriptStats[scriptName, "WARN"]
+            error := this.scriptStats[scriptName, "ERROR"]
+            load := this.scriptStats[scriptName, "LOAD"]
+            total := this.scriptStats[scriptName, "total"]
+            storedDebug := this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("DEBUG") ? this.logCounts[scriptName]["DEBUG"] : 0
+            storedInfo  := this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("INFO")  ? this.logCounts[scriptName]["INFO"]  : 0
+            storedWarn  := this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("WARN")  ? this.logCounts[scriptName]["WARN"]  : 0
+            storedError := this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("ERROR") ? this.logCounts[scriptName]["ERROR"] : 0
+            storedLoad  := this.logCounts.HasKey(scriptName) && this.logCounts[scriptName].HasKey("LOAD")  ? this.logCounts[scriptName]["LOAD"]  : 0
+            scriptStatsText := "Script: " . scriptName
+                             . " | Limite por tipo: " . this.maxLogsPerScript
+                             . " | Total processados: " . total
+                             . "`nArmazenados => D:" . storedDebug . " I:" . storedInfo . " W:" . storedWarn . " E:" . storedError . " L:" . storedLoad
+            if (total > 0) {
+                debugPct := Round((debug / total) * 100)
+                infoPct := Round((info / total) * 100)
+                warnPct := Round((warn / total) * 100)
+                errorPct := Round((error / total) * 100)
+                loadPct := Round((load / total) * 100)
+                scriptStatsText .= "`nDistribuição % => D:" . debugPct . " I:" . infoPct . " W:" . warnPct . " E:" . errorPct . " L:" . loadPct
+            }
+        }
+        GuiControl,, StatsTextScript,% scriptStatsText
+    }
+
+    ; ---------------------- GUI EVENTOS ----------------------
+    ScriptsListViewChanged() {
+        if (A_GuiEvent != "C")
+            return
         Gui, Listview, ScriptsListView
         Loop % LV_GetCount() {
-            script := ""
+            rowScript := ""
             isChecked := LV_GetNext(A_Index - 1, "Checked")
-            LV_GetText(script, A_Index, 1)
-            SelectedScripts[script] := isChecked = A_Index ? 1 : 0
+            LV_GetText(rowScript, A_Index, 1)
+            this.selectedScripts[rowScript] := (isChecked = A_Index ? 1 : 0)
         }
         Gui, ListView, ScriptsListView
-        if (SelectedScripts["Todos"] = 1) {
+        if (this.selectedScripts["Todos"] = 1) {
             Loop, % LV_GetCount() {
                 if (A_Index > 1) {
                     LV_GetText(rowScript, A_Index)
-                    SelectedScripts[rowScript] := 1
+                    this.selectedScripts[rowScript] := 1
                     LV_Modify(A_Index, "Check")
                 }
             }
             GuiControl,, StatsTextScript, Exibindo logs de todos os scripts selecionados
-            g_LastSelectedScript := ""
         } else {
             allChecked := true
             selectedScript := ""
-            countSelected := 0
-            
             Loop, % LV_GetCount() {
                 if (A_Index > 1) {
                     LV_GetText(rowScript, A_Index)
-                    if (SelectedScripts[rowScript] = 0) {
+                    if (this.selectedScripts[rowScript] = 0)
                         allChecked := false
-                    } else {
+                    else
                         selectedScript := rowScript
-                        countSelected++
-                    }
                 }
             }
-            
             if (!allChecked) {
                 Loop, % LV_GetCount() {
                     if (A_Index > 1) {
                         LV_GetText(rowScript, A_Index)
-                        if (SelectedScripts[rowScript] = 0) {
+                        if (this.selectedScripts[rowScript] = 0)
                             LV_Modify(A_Index, "-Check")
+                    }
+                }
+            }
+            if (selectedScript != "")
+                this.UpdateScriptSpecificStats(selectedScript)
+            else
+                GuiControl,, StatsTextScript, Selecione um script específico para ver estatísticas detalhadas
+        }
+        if (!this.listViewPaused)
+            this.ScheduleUpdate()
+    }
+
+    SearchChanged() {
+        GuiControlGet, SearchText
+        this.searchText := SearchText
+        if (!this.listViewPaused)
+            SetTimer, Server_ApplyFiltersTimer, -500
+    }
+
+    ApplyFiltersTimer() {
+        this.ScheduleUpdate()
+    }
+
+    ApplyFilters() {
+        if (!this.listViewPaused)
+            this.ScheduleUpdate()
+    }
+
+    ; ---------------------- APLICAÇÃO DE FILTROS PRINCIPAL ----------------------
+    ApplyFiltersOptimized(forceUpdate := false) {
+        static lastSearchText := ""
+        static lastChkDEBUG := ""
+        static lastChkINFO := ""
+        static lastChkWARN := ""
+        static lastChkERROR := ""
+        static lastChkLOAD := ""
+        static lastLogsLength := 0
+        static lastSelectedHash := ""
+        static lastLogsSignature := ""
+
+        if (this.listViewPaused && !forceUpdate)
+            return
+
+        Gui, Submit, NoHide
+        GuiControlGet, SearchText
+        GuiControlGet, ChkDEBUG
+        GuiControlGet, ChkINFO
+        GuiControlGet, ChkWARN
+        GuiControlGet, ChkERROR
+        GuiControlGet, ChkLOAD
+        this.searchText := SearchText
+
+        selectedHash := ""
+        for scriptName, isSel in this.selectedScripts
+            selectedHash .= scriptName . ":" . isSel . "|"
+
+        logsSignature := ""
+        if (this.logs.Length() > 0)
+            logsSignature := this.logs[1].timestamp . "|" . this.logs[1].script . "|" . this.logs.Length()
+
+        needsUpdate := forceUpdate
+        if (!needsUpdate) {
+            if (SearchText != lastSearchText
+            || ChkDEBUG != lastChkDEBUG
+            || ChkINFO != lastChkINFO
+            || ChkWARN != lastChkWARN
+            || ChkERROR != lastChkERROR
+            || ChkLOAD != lastChkLOAD
+            || this.logs.Length() != lastLogsLength
+            || selectedHash != lastSelectedHash
+            || logsSignature != lastLogsSignature)
+                needsUpdate := true
+        }
+
+        if (needsUpdate) {
+            Gui, ListView, LogView
+            currentFocus := LV_GetNext(0, "Focused")
+            if (currentFocus > 0)
+                this.lastScrollPos := currentFocus
+
+            lastSearchText := SearchText
+            lastChkDEBUG := ChkDEBUG
+            lastChkINFO := ChkINFO
+            lastChkWARN := ChkWARN
+            lastChkERROR := ChkERROR
+            lastChkLOAD := ChkLOAD
+            lastLogsLength := this.logs.Length()
+            lastSelectedHash := selectedHash
+            lastLogsSignature := logsSignature
+
+            if (this.virtualMode)
+                this.UpdateVirtualListView()
+            else
+                this.UpdateStandardListView()
+
+            SB_SetText("Logs exibidos: " . LV_GetCount() . " / " . this.logs.Length(), 1)
+        }
+    }
+
+    UpdateVirtualListView() {
+        this.filteredLogs := []
+        for index, item in this.logs
+            if (this.ShouldShowItem(item))
+                this.filteredLogs.Push(item)
+
+        Gui, ListView, LogView
+        currentCount := LV_GetCount()
+        newCount := this.filteredLogs.Length()
+
+        if (Abs(newCount - currentCount) > this.updateThreshold || currentCount = 0) {
+            this.RebuildListView()
+        } else {
+            firstThreeValid := true
+            if (currentCount > 0 && newCount > 0) {
+                Loop, 3 {
+                    if (A_Index <= currentCount && A_Index <= newCount) {
+                        LV_GetText(lvTimestamp, A_Index, 1)
+                        LV_GetText(lvScript, A_Index, 5)
+                        if (this.filteredLogs[A_Index].timestamp != lvTimestamp || this.filteredLogs[A_Index].script != lvScript) {
+                            firstThreeValid := false
+                            break
                         }
                     }
                 }
             }
-            
-            ; Se apenas um script estiver selecionado, mostrar estatísticas
-            if (countSelected = 1 && selectedScript != "") {
-                UpdateScriptSpecificStats(selectedScript)
-            } else if (countSelected > 1) {
-                GuiControl,, StatsTextScript, Exibindo logs de %countSelected% scripts selecionados
-                g_LastSelectedScript := ""
-            } else {
-                GuiControl,, StatsTextScript, Selecione um script específico para ver estatísticas detalhadas
-                g_LastSelectedScript := ""
-            }
+            if (firstThreeValid)
+                this.UpdateListViewIncremental()
+            else
+                this.RebuildListView()
         }
-        ; Se não estiver pausado, aplica os filtros
-        if (!g_ListViewPaused) {
-            ScheduleUpdate()
-        }
+        if (this.lastScrollPos > 0 && this.lastScrollPos <= LV_GetCount())
+            LV_Modify(this.lastScrollPos, "Focus")
     }
-return
 
-SearchChanged:
-    GuiControlGet, SearchText
-    ; Se não estiver pausado, agenda update
-    if (!g_ListViewPaused) {
-        SetTimer, ApplyFiltersTimer, -500
-    }
-return
-
-ApplyFiltersTimer:
-    ScheduleUpdate()
-return
-
-; --------- ListView / Virtualização ---------
-ApplyFilters:
-    ; Se não estiver pausado, agenda update
-    if (!g_ListViewPaused) {
-        ScheduleUpdate()
-    }
-return
-
-ApplyFiltersOptimized(forceUpdate := false) {
-    global g_aLogs, SearchText, SelectedScripts, g_FilteredLogs, g_VirtualMode, g_LastScrollPos, g_UpdateThreshold, g_ListViewPaused
-    static lastSearchText := ""
-    static lastChkDEBUG := ""
-    static lastChkINFO := ""
-    static lastChkWARN := ""
-    static lastChkERROR := ""
-    static lastChkLOAD := ""
-    static lastLogsLength := 0
-    static lastSelectedHash := ""
-    static lastLogsSignature := ""
-    
-    ; Se pausado, não atualiza
-    if (g_ListViewPaused && !forceUpdate) {
-        return
-    }
-    
-    Gui, Submit, NoHide
-    GuiControlGet, SearchText
-    GuiControlGet, ChkDEBUG
-    GuiControlGet, ChkINFO
-    GuiControlGet, ChkWARN
-    GuiControlGet, ChkERROR
-    GuiControlGet, ChkLOAD
-    
-    selectedHash := ""
-    for script, isSelected in SelectedScripts
-        selectedHash .= script . ":" . isSelected . "|"
-    
-    logsSignature := ""
-    if (g_aLogs.Length() > 0)
-        logsSignature := g_aLogs[1].timestamp . "|" . g_aLogs[1].script . "|" . g_aLogs.Length()
-    
-    needsUpdate := forceUpdate
-    if (!needsUpdate) {
-        if (SearchText != lastSearchText
-        || ChkDEBUG != lastChkDEBUG
-        || ChkINFO != lastChkINFO
-        || ChkWARN != lastChkWARN
-        || ChkERROR != lastChkERROR
-        || ChkLOAD != lastChkLOAD
-        || g_aLogs.Length() != lastLogsLength
-        || selectedHash != lastSelectedHash
-        || logsSignature != lastLogsSignature)
-            needsUpdate := true
-    }
-    
-    if (needsUpdate) {
+    UpdateStandardListView() {
         Gui, ListView, LogView
-        currentFocus := LV_GetNext(0, "Focused")
-        if (currentFocus > 0)
-            g_LastScrollPos := currentFocus
-        
-        lastSearchText := SearchText
-        lastChkDEBUG := ChkDEBUG
-        lastChkINFO := ChkINFO
-        lastChkWARN := ChkWARN
-        lastChkERROR := ChkERROR
-        lastChkLOAD := ChkLOAD
-        lastLogsLength := g_aLogs.Length()
-        lastSelectedHash := selectedHash
-        lastLogsSignature := logsSignature
-        
-        if (g_VirtualMode)
-            UpdateVirtualListView()
-        else
-            UpdateStandardListView()
-        
-        SB_SetText("Logs exibidos: " . LV_GetCount() . " / " . g_aLogs.Length(), 1)
+        LV_Delete()
+        for index, item in this.logs
+            if (this.ShouldShowItem(item))
+                LV_Add("", item.timestamp, item.socket, item.ip, item.tipo, item.script, item.mensagem)
     }
-}
 
-UpdateVirtualListView() {
-    global g_aLogs, g_FilteredLogs, SearchText, SelectedScripts, g_LastScrollPos, g_UpdateThreshold
-    
-    g_FilteredLogs := []
-    for index, item in g_aLogs
-        if (ShouldShowItem(item))
-            g_FilteredLogs.Push(item)
-    
-    Gui, ListView, LogView
-    currentCount := LV_GetCount()
-    newCount := g_FilteredLogs.Length()
-    
-    if (Abs(newCount - currentCount) > g_UpdateThreshold || currentCount = 0) {
-        RebuildListView()
-    } else {
-        firstThreeValid := true
-        if (currentCount > 0 && newCount > 0) {
-            Loop, 3 {
-                if (A_Index <= currentCount && A_Index <= newCount) {
-                    LV_GetText(lvTimestamp, A_Index, 1)
-                    LV_GetText(lvScript, A_Index, 5)
-                    if (g_FilteredLogs[A_Index].timestamp != lvTimestamp || g_FilteredLogs[A_Index].script != lvScript) {
-                        firstThreeValid := false
-                        break
-                    }
-                }
+    UpdateListViewIncremental() {
+        Gui, ListView, LogView
+        currentCount := LV_GetCount()
+        targetCount := this.filteredLogs.Length()
+        if (targetCount > currentCount) {
+            itemsToAdd := targetCount - currentCount
+            Loop, % itemsToAdd {
+                item := this.filteredLogs[A_Index]
+                LV_Insert(1, "", item.timestamp, item.socket, item.ip, item.tipo, item.script, item.mensagem)
             }
+        } else if (targetCount < currentCount) {
+            itemsToRemove := currentCount - targetCount
+            Loop, % itemsToRemove
+                LV_Delete(LV_GetCount())
         }
-        
-        if (firstThreeValid)
-            UpdateListViewIncremental()
-        else
-            RebuildListView()
     }
-    
-    if (g_LastScrollPos > 0 && g_LastScrollPos <= LV_GetCount())
-        LV_Modify(g_LastScrollPos, "Focus")
-}
 
-UpdateStandardListView() {
-    global g_aLogs, SearchText, SelectedScripts
-    Gui, ListView, LogView
-    LV_Delete()
-    for index, item in g_aLogs
-        if (ShouldShowItem(item))
+    RebuildListView() {
+        Gui, ListView, LogView
+        LV_Delete()
+        for index, item in this.filteredLogs
             LV_Add("", item.timestamp, item.socket, item.ip, item.tipo, item.script, item.mensagem)
-}
-
-UpdateListViewIncremental() {
-    global g_FilteredLogs
-    Gui, ListView, LogView
-    currentCount := LV_GetCount()
-    targetCount := g_FilteredLogs.Length()
-    
-    if (targetCount > currentCount) {
-        itemsToAdd := targetCount - currentCount
-        Loop, %itemsToAdd% {
-            item := g_FilteredLogs[A_Index]
-            LV_Insert(1, "", item.timestamp, item.socket, item.ip, item.tipo, item.script, item.mensagem)
-        }
     }
-    else if (targetCount < currentCount) {
-        itemsToRemove := currentCount - targetCount
-        Loop, %itemsToRemove% {
-            LV_Delete(LV_GetCount())
-        }
+
+    ShouldShowItem(item) {
+        global ChkDEBUG, ChkINFO, ChkWARN, ChkERROR, ChkLOAD
+        showByType := ( (item.tipo = "DEBUG" && ChkDEBUG)
+                     || (item.tipo = "INFO"  && ChkINFO)
+                     || (item.tipo = "WARN"  && ChkWARN)
+                     || (item.tipo = "ERROR" && ChkERROR)
+                     || (item.tipo = "LOAD"  && ChkLOAD) )
+        showByText := (this.searchText = "")
+                   || InStr(item.mensagem, this.searchText, false)
+                   || InStr(item.script, this.searchText, false)
+        showByScript := (this.selectedScripts["Todos"] = 1) || (this.selectedScripts[item.script] = 1)
+        return (showByType && showByText && showByScript)
+    }
+
+    ResizeListViewColumns() {
+        Gui, ListView, LogView
+        col1Width := 140
+        col2Width := 60
+        col3Width := 100
+        col4Width := 60
+        col5Width := 120
+        GuiControlGet, pos, Pos, LogView
+        listViewWidth := posW
+        scrollBarWidth := 20
+        borderWidth := 4
+        col6Width := listViewWidth - col1Width - col2Width - col3Width - col4Width - col5Width - scrollBarWidth - borderWidth
+        if (col6Width < 100)
+            col6Width := 100
+        LV_ModifyCol(1, col1Width)
+        LV_ModifyCol(2, col2Width)
+        LV_ModifyCol(3, col3Width)
+        LV_ModifyCol(4, col4Width)
+        LV_ModifyCol(5, col5Width)
+        LV_ModifyCol(6, col6Width)
+    }
+
+    GuiSize() {
+        if (A_EventInfo = 1)
+            return
+        scriptsListViewWidth := 250
+        statusBarHeight := 25
+        newLogViewWidth := A_GuiWidth - scriptsListViewWidth - 30
+        newLogViewX := scriptsListViewWidth + 20
+        newHeight := A_GuiHeight - 245 - statusBarHeight
+
+        GuiControl, Move, ScriptsListView,% "w" . scriptsListViewWidth . " h" . newHeight
+        GuiControl, Move, LogView,% "x" . newLogViewX . " w" . newLogViewWidth . " h" . newHeight
+        Gui, ListView, LogView
+        this.ResizeListViewColumns()
+    }
+
+    GuiClose() {
+        AHKsock_Close()
+        ExitApp
     }
 }
 
-RebuildListView() {
-    global g_FilteredLogs
-    Gui, ListView, LogView
-    LV_Delete()
-    for index, item in g_FilteredLogs
-        LV_Add("", item.timestamp, item.socket, item.ip, item.tipo, item.script, item.mensagem)
-}
-
-ShouldShowItem(item) {
-    global SearchText, SelectedScripts
-    typeVar := "Chk" . (item.tipo = "N/A" ? "Indisponivel" : item.tipo)
-    showByType := %typeVar%
-    showByText := (SearchText = "") 
-                || InStr(item.mensagem, SearchText, false) 
-                || InStr(item.script, SearchText, false)
-    showByScript := (SelectedScripts["Todos"] = 1) || (SelectedScripts[item.script] = 1)
-    return (showByType && showByText && showByScript)
-}
-
-ResizeListViewColumns() {
-    Gui, ListView, LogView
-    col1Width := 140
-    col2Width := 60
-    col3Width := 100
-    col4Width := 60
-    col5Width := 120
-    GuiControlGet, pos, Pos, LogView
-    listViewWidth := posW
-    scrollBarWidth := 20
-    borderWidth := 4
-    col6Width := listViewWidth - col1Width - col2Width - col3Width - col4Width - col5Width - scrollBarWidth - borderWidth
-    if (col6Width < 100)
-        col6Width := 100
-    LV_ModifyCol(1, col1Width)
-    LV_ModifyCol(2, col2Width) 
-    LV_ModifyCol(3, col3Width)
-    LV_ModifyCol(4, col4Width)
-    LV_ModifyCol(5, col5Width)
-    LV_ModifyCol(6, col6Width)
-}
-
+; ---------------------- LABELS DE GUI REDIRECIONADOS ----------------------
 GuiSize:
-    if (A_EventInfo = 1)
-        return
-    
-    scriptsListViewWidth := 250
-    statusBarHeight := 25
-    bottomPadding := 95  ; Espaço reservado para a área de estatísticas no rodapé
-    
-    newLogViewWidth := A_GuiWidth - scriptsListViewWidth - 40
-    newLogViewX := scriptsListViewWidth + 20
-    newHeight := A_GuiHeight - 245 - statusBarHeight - bottomPadding
-    
-    ; Ajustar elementos
-    GuiControl, Move, ScriptsListView, % "w" . scriptsListViewWidth . " h" . newHeight
-    GuiControl, Move, LogView, % "x" . newLogViewX . " w" . newLogViewWidth . " h" . newHeight
-    
-    ; Mover e redimensionar caixa de estatísticas específicas
-    statsY := 245 + newHeight + 10
-    GuiControl, Move, StatsTextScript, % "y" . (statsY + 20)
-    GuiControl, MoveDraw, % "Static" . 99999, % "y" . statsY . " w" . (A_GuiWidth - 20)
-    
-    Gui, ListView, LogView
-    ResizeListViewColumns()
-return
+    Server_GuiSize()
+Return
 
 GuiClose:
-    AHKsock_Close()
-    ExitApp
+    Server_GuiClose()
+Return
