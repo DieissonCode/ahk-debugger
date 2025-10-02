@@ -274,30 +274,59 @@ Return
 					SB_SetText("Clientes conectados: " . this.connectedClients, 2)
 				} else if (sEvent = "RECEIVED") {
 					dataStr := StrGet(&bData, bDataLength, "UTF-8")
-					partes := StrSplit(dataStr, "||")
-					tipo := "N/A", scriptName := "N/A", mensagem := "N/A"
-					for _, parte in partes {
-						if (SubStr(parte, 1, 5) = "tipo=" || SubStr(parte, 1, 5) = "type=")
-							tipo := SubStr(parte, 6)
-						else if (SubStr(parte, 1, 11) = "scriptName=")
-							scriptName := SubStr(parte, 12)
-						else if (SubStr(parte, 1, 9) = "mensagem=" || SubStr(parte, 1, 8) = "message=")
-							mensagem := SubStr(parte, InStr(parte, "=") + 1)
+					Switch	{
+						Case Instr(dataStr, "&&"):
+							splitedData := StrSplit(dataStr, "&&")
+							Loop % splitedData.Count()-1	{
+								dataStr := StrReplace(splitedData[A_Index], "&&")
+								partes := StrSplit(dataStr, "||")
+								tipo := "N/A", scriptName := "N/A", mensagem := "N/A"
+								for _, parte in partes {
+									if (SubStr(parte, 1, 5) = "tipo=" || SubStr(parte, 1, 5) = "type=")
+										tipo := SubStr(parte, 6)
+									else if (SubStr(parte, 1, 11) = "scriptName=")
+										scriptName := SubStr(parte, 12)
+									else if (SubStr(parte, 1, 9) = "mensagem=" || SubStr(parte, 1, 8) = "message=")
+										mensagem := SubStr(parte, InStr(parte, "=") + 1)
+								}
+								this.AddScriptToRegistry(scriptName)
+								this.UpdateScriptStats(scriptName, tipo)
+								FormatTime, timestamp,, % this.timestampFormat
+								this.logsReceived++
+								newMsg := {timestamp: timestamp, socket: iSocket, ip: sAddr, tipo: tipo, script: scriptName, mensagem: mensagem}
+								this.AddToWarnErrorBuffer(newMsg)
+								wasRemoved := this.AddLogWithLimit(newMsg)
+								this.TryRegisterMotionDetection(newMsg)
+								if (!this.listViewPaused)
+									this.ApplyFiltersSmartUpdate(newMsg, wasRemoved)
+								this.UpdateScriptSpecificStatsIfSelected(scriptName)
+								this.UpdateStatsDisplay()
+							}
+						Default:
+							partes := StrSplit(dataStr, "||")
+							tipo := "N/A", scriptName := "N/A", mensagem := "N/A"
+							for _, parte in partes {
+								if (SubStr(parte, 1, 5) = "tipo=" || SubStr(parte, 1, 5) = "type=")
+									tipo := SubStr(parte, 6)
+								else if (SubStr(parte, 1, 11) = "scriptName=")
+									scriptName := SubStr(parte, 12)
+								else if (SubStr(parte, 1, 9) = "mensagem=" || SubStr(parte, 1, 8) = "message=")
+									mensagem := SubStr(parte, InStr(parte, "=") + 1)
+							}
+							this.AddScriptToRegistry(scriptName)
+							this.UpdateScriptStats(scriptName, tipo)
+							FormatTime, timestamp,, % this.timestampFormat
+							this.logsReceived++
+							newMsg := {timestamp: timestamp, socket: iSocket, ip: sAddr, tipo: tipo, script: scriptName, mensagem: mensagem}
+							this.AddToWarnErrorBuffer(newMsg)
+							wasRemoved := this.AddLogWithLimit(newMsg)
+							this.TryRegisterMotionDetection(newMsg)
+							if (!this.listViewPaused)
+								this.ApplyFiltersSmartUpdate(newMsg, wasRemoved)
+							this.UpdateScriptSpecificStatsIfSelected(scriptName)
+							this.UpdateStatsDisplay()
 					}
-					;If	!A_IsCompiled && InStr(dataStr, "18 - mdkah")
-						;msgbox, %dataStr%
-					this.AddScriptToRegistry(scriptName)
-					this.UpdateScriptStats(scriptName, tipo)
-					FormatTime, timestamp,, % this.timestampFormat
-					this.logsReceived++
-					newMsg := {timestamp: timestamp, socket: iSocket, ip: sAddr, tipo: tipo, script: scriptName, mensagem: mensagem}
-					this.AddToWarnErrorBuffer(newMsg)
-					wasRemoved := this.AddLogWithLimit(newMsg)
-					this.TryRegisterMotionDetection(newMsg)
-					if (!this.listViewPaused)
-						this.ApplyFiltersSmartUpdate(newMsg, wasRemoved)
-					this.UpdateScriptSpecificStatsIfSelected(scriptName)
-					this.UpdateStatsDisplay()
+
 				} else if (sEvent = "DISCONNECTED") {
 					this.connectedClients--
 					if (this.connectedClients < 0)
